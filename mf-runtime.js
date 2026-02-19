@@ -1,10 +1,44 @@
 (function () {
-    if (window.__MODALFLOW_RUNTIME_LOADED__) {
+    if (window.__MODAL_RUNTIME_LOADED__) {
         return;
     }
-    window.__MODALFLOW_RUNTIME_LOADED__ = true;
+    window.__MODAL_RUNTIME_LOADED__ = true;
     
     const API_BASE = "https://mfb.modalsupport.com";
+
+    function _safeStorageGet(storage, key) {
+        try { return storage.getItem(key); } catch (e) { return null; }
+    }
+    function _safeStorageSet(storage, key, value) {
+        try { storage.setItem(key, value); } catch (e) {}
+    }
+    function _safeStorageRemove(storage, key) {
+        try { storage.removeItem(key); } catch (e) {}
+    }
+
+    const _ls = {
+        get: function(k) { return _safeStorageGet(localStorage, k); },
+        set: function(k, v) { _safeStorageSet(localStorage, k, v); },
+        remove: function(k) { _safeStorageRemove(localStorage, k); }
+    };
+    const _ss = {
+        get: function(k) { return _safeStorageGet(sessionStorage, k); },
+        set: function(k, v) { _safeStorageSet(sessionStorage, k, v); },
+        remove: function(k) { _safeStorageRemove(sessionStorage, k); }
+    };
+
+    function _randomUUID() {
+        try {
+            if (crypto && typeof crypto.randomUUID === 'function') {
+                return crypto.randomUUID();
+            }
+        } catch (e) {}
+        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+            var r = Math.random() * 16 | 0;
+            var v = c === 'x' ? r : (r & 0x3 | 0x8);
+            return v.toString(16);
+        });
+    }
 
     function hexToRgba(hex, alpha) {
         if (!hex || typeof hex !== 'string') return alpha >= 0 && alpha < 1 ? 'rgba(13,110,253,' + alpha + ')' : 'rgba(13,110,253,0.65)';
@@ -28,6 +62,14 @@
         }
         return true;
     };
+
+    var _raf = (typeof requestAnimationFrame === 'function')
+        ? function(fn) { try { return requestAnimationFrame(fn); } catch(e) { return setTimeout(fn, 16); } }
+        : function(fn) { return setTimeout(fn, 16); };
+
+    var _perfNow = (typeof performance !== 'undefined' && typeof performance.now === 'function')
+        ? function() { try { return performance.now(); } catch(e) { return Date.now(); } }
+        : function() { return Date.now(); };
 
     const sdk = window.modal || {};
     const queue = sdk._queue || [];
@@ -82,6 +124,7 @@
         return envKey.slice(3);
     }
     sdk._deriveSecret = async function(envKey, refKey, masterSecret) {
+        try {
         const key = await crypto.subtle.importKey(
             'raw',
             new TextEncoder().encode(masterSecret),
@@ -99,9 +142,13 @@
         return [...new Uint8Array(derived)]
             .map(b => b.toString(16).padStart(2, '0'))
             .join('');
+        } catch (e) {
+            throw new Error('[ModalFlow] crypto.subtle not available: ' + (e && e.message || e));
+        }
     };
 
     sdk._signHmac = async function (payload, hexSecret) {
+        try {
         const key = await crypto.subtle.importKey(
             'raw',
             new TextEncoder().encode(hexSecret),  // Changed: treat as hex string
@@ -119,6 +166,9 @@
         return [...new Uint8Array(sig)]
             .map(b => b.toString(16).padStart(2, '0'))
             .join('');
+        } catch (e) {
+            throw new Error('[ModalFlow] crypto.subtle.sign failed: ' + (e && e.message || e));
+        }
     };
 
     sdk._loadFlowFromApi = async function (flowId, flowVersionId = null, environmentId = null) {
@@ -126,7 +176,6 @@
             return null;
         }
 
-        // Check if flow data is already loaded
         if (sdk._flowObjects && sdk._flowObjects[flowId]) {
             return {
                 flowObjects: sdk._flowObjects[flowId],
@@ -137,18 +186,14 @@
         }
 
         try {
-            // Use flowid in URL path and flow_version_id as query parameter only
-            // https://mfb.modalsupport.com/getflowdata?flow_version_id&flow_ref&env_ref
             const flowApiUrl = new URL('https://mfb.modalsupport.com/getflowdata');
             
-            // Only add flow_version_id if it's available
             if (flowVersionId) {
                 flowApiUrl.searchParams.set('flow_version_id', flowVersionId);
             }
             
             flowApiUrl.searchParams.set('flow_ref', flowId);
             
-            // Add environment ID if provided
             if (environmentId) {
                 flowApiUrl.searchParams.set('env_ref', environmentId);
             }
@@ -168,16 +213,12 @@
                 return null;
             }
 
-            // Handle new API response structure: { message: "Success", data: {...} }
             const flowData = flowResponse.data || flowResponse;
             
-            // New format only: { message: "Success", data: {...} }
             const data = flowResponse.data || flowResponse;
             
-            // Store steps directly in new format
             const flowSteps = data.steps || [];
             
-            // Convert behavior and theme to setup config (for compatibility with existing code)
             const behavior = data.behavior || {};
             const theme = data.theme || {};
             
@@ -201,7 +242,6 @@
             sdk._autoStartSettings = sdk._autoStartSettings || {};
             sdk._autoStartSettings[flowId] = setupConfig.auto_start || setupConfig.autoStart;
             
-            // Store flow objects and setup
             sdk._flowObjects = sdk._flowObjects || {};
             sdk._flowsetup = sdk._flowsetup || {};
             sdk._flowObjects[flowId] = flowSteps;
@@ -247,18 +287,15 @@
         try {
             const envKey = options.envKey || window.__modalFlowEnvKey || '';
             const ts = Date.now().toString();
-            const nonce = crypto.randomUUID();
+            const nonce = _randomUUID();
 
-            // Derive the secret (same as backend)
             const derivedSecret = await sdk._deriveSecret(envKey, refKey, masterSecret);
 
-            // Canonical request data
             const method = 'GET';
             const path = '/sdkmodal';
             const query = `env_key=${envKey}&nonce=${nonce}&ref_key=${refKey}&ts=${ts}`;
 
             const payload = `${method}:${path}:${query}:${ts}:`;
-            // Sign with derived secret
             const signature = await sdk._signHmac(payload, derivedSecret);
 
             const url = new URL('https://mfb.modalsupport.com/sdkmodal');
@@ -276,7 +313,6 @@
 
             const data = await res.json();
 
-            // Parse and store flowstyle (base_colors.brand) for flow step UI and launcher tooltips
             try {
                 sdk._flowstyle = (typeof data.flowstyle === 'string' ? JSON.parse(data.flowstyle) : data.flowstyle) || {};
             } catch (_) {
@@ -285,26 +321,29 @@
             if (sdk._flowstyle?.base_colors?.brand && !document.getElementById('modalflow-brand-vars')) {
                 const b = sdk._flowstyle.base_colors.brand;
                 const parts = [];
-                if (b.background) parts.push('--ms-brand-background:' + b.background);
-                if (b.backgroundHover) parts.push('--ms-brand-background-hover:' + b.backgroundHover);
-                if (b.backgroundClick) parts.push('--ms-brand-background-active:' + b.backgroundClick);
-                if (b.text) parts.push('--ms-brand-text:' + b.text);
+                if (b.background) parts.push('--mf-brand-background:' + b.background);
+                if (b.backgroundHover) parts.push('--mf-brand-background-hover:' + b.backgroundHover);
+                if (b.backgroundClick) parts.push('--mf-brand-background-active:' + b.backgroundClick);
+                if (b.text) parts.push('--mf-brand-text:' + b.text);
                 if (b.background) {
-                    parts.push('--ms-brand-pulse-start:' + hexToRgba(b.background, 0.6));
-                    parts.push('--ms-brand-pulse-end:' + hexToRgba(b.background, 0));
-                    parts.push('--ms-brand-background-subtle:' + hexToRgba(b.background, 0.12));
+                    parts.push('--mf-brand-pulse-start:' + hexToRgba(b.background, 0.6));
+                    parts.push('--mf-brand-pulse-end:' + hexToRgba(b.background, 0));
+                    parts.push('--mf-brand-background-subtle:' + hexToRgba(b.background, 0.12));
                 }
                 if (parts.length) {
                     const st = document.createElement('style');
                     st.id = 'modalflow-brand-vars';
                     st.textContent = ':root{' + parts.join(';') + '}';
-                    document.head.appendChild(st);
+                    (document.head || document.documentElement).appendChild(st);
                 }
             }
+            
             const launchers = Array.isArray(data.launchers) ? data.launchers : [];
+            
             const flowsMeta = data.flows_meta || {};
             sdk._flowsMeta = sdk._flowsMeta || {};
             Object.assign(sdk._flowsMeta, flowsMeta);
+
             const environmentId = data.environment?.env_ref || null;
             if (environmentId) {
                 sdk._environmentId = environmentId;
@@ -317,6 +356,7 @@
             if (flowId && relevantLaunchers.length === 0) {
                 relevantLaunchers = [{ flow_ref: flowId, enabled: true }];
             }
+
             if (relevantLaunchers.length === 0 && Object.keys(flowsMeta).length === 0) {
                 return;
             }
@@ -329,25 +369,21 @@
             sdk._autoStartSettings = sdk._autoStartSettings || {};
             sdk._flows[refKey] = refKey;
 
-            // Process each launcher without loading flow data
             for (const launcherData of relevantLaunchers) {
                 const currentFlowRef = launcherData.flow_ref;
                 if (!currentFlowRef) {
                     continue;
                 }
 
-                // Use launcher ID as unique identifier
                 const launcherId = launcherData.id;
                 if (!launcherId) {
                     console.error("[ModalFlow] Launcher missing required 'id' field:", launcherData);
                     continue;
                 }
                 
-                // Store launcher data for later use (keyed by launcher ID)
                 sdk._launchers = sdk._launchers || {};
                 sdk._launchers[launcherId] = launcherData;
                 
-                // Create mapping from flow_ref to array of launcher IDs
                 sdk._launcherIdsByFlowRef = sdk._launcherIdsByFlowRef || {};
                 if (!sdk._launcherIdsByFlowRef[currentFlowRef]) {
                     sdk._launcherIdsByFlowRef[currentFlowRef] = [];
@@ -356,26 +392,21 @@
                     sdk._launcherIdsByFlowRef[currentFlowRef].push(launcherId);
                 }
                 
-                // Store flow_ref mapping by launcher ID
                 sdk._launcherFlowRefs = sdk._launcherFlowRefs || {};
                 sdk._launcherFlowRefs[launcherId] = currentFlowRef;
                 
-                // Store flow_version_id mapping by launcher ID
                 sdk._launcherFlowVersionIds = sdk._launcherFlowVersionIds || {};
                 if (launcherData.flow_version_id) {
                     sdk._launcherFlowVersionIds[launcherId] = launcherData.flow_version_id;
                 }
 
-                // Process launcher if not skipped (without flow data)
-                // Note: launcher.enabled property is not used for filtering - it has a different purpose
                 if (!skipLauncher) {
-                    // Convert new launcher structure to old format for _processLauncher
-                    // Pass null for flowData since we'll load it on-demand
                     const convertedLauncher = sdk._convertLauncherToOldFormat(launcherData, null);
                     if (convertedLauncher) {
                         await sdk._processLauncher(convertedLauncher, launcherId, refKey, currentFlowRef);
                     }
                 }
+
                 if (!skipAutoStart && hasForcedStep) {
                     const flowDataResult = await sdk._loadFlowData(currentFlowRef, refKey, { envKey });
                     if (flowDataResult && flowDataResult.setupConfig) {
@@ -398,8 +429,6 @@
                 }
             }
 
-            // Process flows_meta for auto-start flows (independent of skipAutoStart flag)
-            // flows_meta auto-start is separate from launcher auto-start
             if (Object.keys(flowsMeta).length > 0) {
                 await sdk._processAutoStartFlows(flowsMeta, refKey, { envKey });
             }
@@ -413,11 +442,10 @@
             return;
         }
 
-
+        const flowCount = Object.keys(flowsMeta).length;
 
         const { envKey } = options;
 
-        // Process each flow in flows_meta
         for (const [flowId, flowMeta] of Object.entries(flowsMeta)) {
             try {
                 const flowRef = flowMeta.flow_ref || flowId;
@@ -425,33 +453,29 @@
 
                 const autoStart = flowMeta.settings?.behavior?.autoStart;
                 
-                // Skip if auto-start is not enabled
                 if (!autoStart || !autoStart.enabled) {
                     continue;
                 }
 
-                // Check frequency (once_per_user)
                 const frequency = autoStart.frequency || 'once_per_user';
 
                 if (frequency === 'once_per_user') {
                     const storageKey = `modalflow_autostart_${flowRef}`;
-                    const alreadyStarted = localStorage.getItem(storageKey);
+                    const alreadyStarted = _ls.get(storageKey);
                     if (alreadyStarted === 'true') {
                         continue; // Skip if already started for this user
                     }
                 }
 
-                // Evaluate conditions
                 const conditions = autoStart.conditions || [];
                 let shouldStart = true;
 
                 if (conditions.length > 0) {
-                    // Evaluate each condition and combine based on condition_type
                     let result = null;
                     for (let i = 0; i < conditions.length; i++) {
                         const condition = conditions[i];
                         const conditionType = String(condition.condition_type || 'if').toLowerCase();
-
+                        const conditionTypeName = condition.type || 'unknown';
                         const passed = sdk._evaluateAutoStartCondition(condition);
 
                         if (conditionType === 'or') {
@@ -463,17 +487,14 @@
                     shouldStart = result !== null ? result : true;
                 }
 
-                // Start flow if conditions match - use same code path as launcher (_executeFlow)
                 if (shouldStart) {
-                    // Load flow data
                     const environmentId = sdk._environmentId || window.__modalFlowEnvKey || null;
                     const flowDataResult = await sdk._loadFlowFromApi(flowRef, flowVersionId, environmentId);
                     
                     if (flowDataResult && flowDataResult.setupConfig) {
-                        // Mark as started for once_per_user frequency
                         if (frequency === 'once_per_user') {
                             const storageKey = `modalflow_autostart_${flowRef}`;
-                            localStorage.setItem(storageKey, 'true');
+                            _ls.set(storageKey, 'true');
                         }
 
                         await sdk._executeFlow(flowRef, refKey, {});
@@ -523,7 +544,6 @@
                 return;
             }
 
-            // Check if any step in the flow uses confetti
             const hasConfettiStep = Array.isArray(guideData) && guideData.some(step => {
                 return step && step.addConfetti === true;
             });
@@ -548,7 +568,6 @@
           return;
         }
         
-        // Mark SDK as loaded
         if (!window.__MF_PREVIEW_BOOTSTRAP__) {
           window.__MF_SDK_LOADED__ = true;
         }
@@ -601,7 +620,6 @@
               } 
             })();
                       
-            // Store current flow ID for tracking dismissed flows
             window.__CURRENT_FLOW_ID__ = '${flowId}';
             
             let __lastStepIndex = 0;
@@ -626,40 +644,49 @@
         })();
         `;
 
-            const blob = new Blob([scriptContent], { type: "application/javascript" });
-            const scriptUrl = URL.createObjectURL(blob);
-            const s = document.createElement("script");
-            s.id = `modalflow-script-${flowId}`;
-            s.src = scriptUrl;
-            s.async = true;
-            document.head.appendChild(s);
+            try {
+                const blob = new Blob([scriptContent], { type: "application/javascript" });
+                const scriptUrl = URL.createObjectURL(blob);
+                const s = document.createElement("script");
+                s.id = `modalflow-script-${flowId}`;
+                s.src = scriptUrl;
+                s.async = true;
+                (document.head || document.documentElement).appendChild(s);
+            } catch (blobErr) {
+                try {
+                    const s = document.createElement("script");
+                    s.id = `modalflow-script-${flowId}`;
+                    s.async = true;
+                    s.textContent = scriptContent;
+                    (document.head || document.documentElement).appendChild(s);
+                } catch (inlineErr) {
+                    console.error("[ModalFlow] Failed to inject script (both methods failed):", inlineErr);
+                }
+            }
 
         } catch (err) {
             console.error("[ModalFlow] Failed to inject inline script:", err);
         }
     };
 
-    // Single source for flow + tooltip UI styles. One style element (modalflow-preview-styles) in DOM.
     sdk._getPreviewStyles = function () {
         return [
             '#modalflow-guide-overlay{font-family:sans-serif}',
-            '.mf-progress-bar{position:absolute;bottom:0;left:0;right:0;height:4px;background:var(--ms-theme-border);border-radius:0 0 10px 10px;overflow:hidden;}',
-            '.mf-progress-fill{height:100%;background:var(--ms-brand-background,var(--ms-theme-primary,#0d6efd));transition:width 0.3s ease;}',
-            '.mf-preview-badge{position:absolute;top:12px;left:12px;background:var(--ms-brand-background,var(--ms-theme-primary,#0d6efd));color:var(--ms-brand-text,var(--ms-theme-text-on-primary,#fff));font-size:10px;font-weight:600;padding:4px 8px;border-radius:4px;text-transform:uppercase;letter-spacing:0.5px;z-index:2;}',
-            '.mf-step-box{background:var(--ms-theme-background);border-radius:10px;padding:48px 24px 24px 24px !important;box-shadow:0 4px 20px var(--ms-theme-shadow);max-width:400px;width:90vw;position:relative;font-family:system-ui,-apple-system,sans-serif;font-size:14px;line-height:1.5;color:var(--ms-theme-text-primary);border:1px solid var(--ms-theme-border);}',
-            '.mf-step-title{font-size:20px;font-weight:600;margin:0 0 12px 0;color:var(--ms-theme-text-primary);line-height:1.3;}',
-            '.mf-step-content{color:var(--ms-theme-text-secondary);margin-bottom:20px;font-size:14px;line-height:1.6;}',
-            '.mf-btn{background:var(--ms-brand-background,var(--ms-theme-primary,#0d6efd));color:var(--ms-brand-text,var(--ms-theme-text-on-primary,#fff));border:2px solid var(--ms-brand-background,var(--ms-theme-primary,#0d6efd));padding:6px 14px;border-radius:8px;font-size:14px;font-weight:500;cursor:pointer;transition:background 0.2s,border-color 0.2s;outline:none;box-sizing:border-box;}',
-            '.mf-btn:hover{background:var(--ms-brand-background-hover,var(--ms-theme-primary-hover,#0b5ed7));border-color:var(--ms-brand-background-hover,var(--ms-theme-primary-hover,#0b5ed7));}',
-            '.mf-btn:active{background:var(--ms-brand-background-active,var(--ms-theme-primary-hover,#0a58ca));border-color:var(--ms-brand-background-active,var(--ms-theme-primary-hover,#0a58ca));}',
-            '.mf-btn-secondary{border:2px solid var(--ms-brand-background,var(--ms-theme-primary,#0d6efd));background:transparent;color:var(--ms-brand-background,var(--ms-theme-primary,#0d6efd));padding:6px 14px;border-radius:8px;cursor:pointer;font-size:14px;font-weight:500;transition:background 0.2s,color 0.2s,border-color 0.2s;box-sizing:border-box;}',
-            '.mf-btn-secondary:hover{background:var(--ms-brand-background,var(--ms-theme-primary,#0d6efd));color:var(--ms-brand-text,var(--ms-theme-text-on-primary,#fff));}',
-            '.mf-btn-secondary:active{background:var(--ms-brand-background-active,var(--ms-theme-primary-hover,#0a58ca));border-color:var(--ms-brand-background-active,var(--ms-theme-primary-hover,#0a58ca));color:var(--ms-brand-text,var(--ms-theme-text-on-primary,#fff));}',
-            // Close button: add safe fallbacks for dark themes
-            '.mf-close-btn{position:absolute;top:6px;right:10px;width:24px;height:24px;border:none;background:transparent;font-size:24px;cursor:pointer;color:var(--ms-theme-text-secondary, rgba(0,0,0,0.55));transition:color 0.2s, background 0.2s;display:flex;align-items:center;justify-content:center;border-radius:6px;z-index:2;line-height:1;}',
-            '.mf-close-btn:hover{color:var(--ms-theme-text-primary, #111827);background:var(--ms-theme-close-hover-bg, rgba(0,0,0,0.08));}',
-            // When theme vars are missing but the UI background is dark, ensure contrast.
-            '@media (prefers-color-scheme: dark){.mf-close-btn{color:var(--ms-theme-text-secondary, rgba(255,255,255,0.78));}.mf-close-btn:hover{color:var(--ms-theme-text-primary, #ffffff);background:var(--ms-theme-close-hover-bg, rgba(255,255,255,0.14));}}',
+            '.mf-progress-bar{position:absolute;bottom:0;left:0;right:0;height:4px;background:var(--mf-theme-border);border-radius:0 0 10px 10px;overflow:hidden;}',
+            '.mf-progress-fill{height:100%;background:var(--mf-brand-background,var(--mf-theme-primary,#0d6efd));transition:width 0.3s ease;}',
+            '.mf-preview-badge{position:absolute;top:12px;left:12px;background:var(--mf-brand-background,var(--mf-theme-primary,#0d6efd));color:var(--mf-brand-text,var(--mf-theme-text-on-primary,#fff));font-size:10px;font-weight:600;padding:4px 8px;border-radius:4px;text-transform:uppercase;letter-spacing:0.5px;z-index:2;}',
+            '.mf-step-box{background:var(--mf-theme-background);border-radius:10px;padding:48px 24px 24px 24px !important;box-shadow:0 4px 20px var(--mf-theme-shadow);max-width:400px;width:90vw;position:relative;font-family:system-ui,-apple-system,sans-serif;font-size:14px;line-height:1.5;color:var(--mf-theme-text-primary);border:1px solid var(--mf-theme-border);}',
+            '.mf-step-title{font-size:20px;font-weight:600;margin:0 0 12px 0;color:var(--mf-theme-text-primary);line-height:1.3;}',
+            '.mf-step-content{color:var(--mf-theme-text-secondary);margin-bottom:20px;font-size:14px;line-height:1.6;}',
+            '.mf-btn{background:var(--mf-brand-background,var(--mf-theme-primary,#0d6efd));color:var(--mf-brand-text,var(--mf-theme-text-on-primary,#fff));border:2px solid var(--mf-brand-background,var(--mf-theme-primary,#0d6efd));padding:6px 14px;border-radius:8px;font-size:14px;font-weight:500;cursor:pointer;transition:background 0.2s,border-color 0.2s;outline:none;box-sizing:border-box;}',
+            '.mf-btn:hover{background:var(--mf-brand-background-hover,var(--mf-theme-primary-hover,#0b5ed7));border-color:var(--mf-brand-background-hover,var(--mf-theme-primary-hover,#0b5ed7));}',
+            '.mf-btn:active{background:var(--mf-brand-background-active,var(--mf-theme-primary-hover,#0a58ca));border-color:var(--mf-brand-background-active,var(--mf-theme-primary-hover,#0a58ca));}',
+            '.mf-btn-secondary{border:2px solid var(--mf-brand-background,var(--mf-theme-primary,#0d6efd));background:transparent;color:var(--mf-brand-background,var(--mf-theme-primary,#0d6efd));padding:6px 14px;border-radius:8px;cursor:pointer;font-size:14px;font-weight:500;transition:background 0.2s,color 0.2s,border-color 0.2s;box-sizing:border-box;}',
+            '.mf-btn-secondary:hover{background:var(--mf-brand-background,var(--mf-theme-primary,#0d6efd));color:var(--mf-brand-text,var(--mf-theme-text-on-primary,#fff));}',
+            '.mf-btn-secondary:active{background:var(--mf-brand-background-active,var(--mf-theme-primary-hover,#0a58ca));border-color:var(--mf-brand-background-active,var(--mf-theme-primary-hover,#0a58ca));color:var(--mf-brand-text,var(--mf-theme-text-on-primary,#fff));}',
+            '.mf-close-btn{position:absolute;top:6px;right:10px;width:24px;height:24px;border:none;background:transparent;font-size:24px;cursor:pointer;color:var(--mf-theme-text-secondary, rgba(0,0,0,0.55));transition:color 0.2s, background 0.2s;display:flex;align-items:center;justify-content:center;border-radius:6px;z-index:2;line-height:1;}',
+            '.mf-close-btn:hover{color:var(--mf-theme-text-primary, #111827);background:var(--mf-theme-close-hover-bg, rgba(0,0,0,0.08));}',
+            '@media (prefers-color-scheme: dark){.mf-close-btn{color:var(--mf-theme-text-secondary, rgba(255,255,255,0.78));}.mf-close-btn:hover{color:var(--mf-theme-text-primary, #ffffff);background:var(--mf-theme-close-hover-bg, rgba(255,255,255,0.14));}}',
             '@keyframes mfBounce {0%, 100% { transform: translateY(0); } 50% { transform: translateY(10px); }}',
             '#mf-arrow-styles{animation: mfBounce 1s infinite;}',
             '.mf-actions{display:flex;gap:8px;margin-top:20px;justify-content:flex-end;}',
@@ -668,9 +695,9 @@
             '.mf-dancing-arrow{position:fixed;width:40px;height:40px;pointer-events:none;z-index:1000000;display:flex;align-items:center;justify-content:center;animation:mfArrowDance 2s ease-in-out infinite;}',
             '.mf-dancing-arrow svg{width:100%;height:100%;filter:drop-shadow(0 2px 4px rgba(0,0,0,0.3));}',
             '@keyframes mfArrowDance{0%{transform:translateY(0px) scale(1)}25%{transform:translateY(-10px) scale(1.1)}50%{transform:translateY(0px) scale(1)}75%{transform:translateY(-5px) scale(1.05)}100%{transform:translateY(0px) scale(1)}}',
-            '.mf-beacon{position:fixed;width:16px;height:16px;border-radius:9999px;background:var(--ms-brand-background,var(--ms-theme-primary,#0d6efd));box-shadow:0 0 0 0 var(--ms-brand-pulse-start,rgba(59,130,246,.65));pointer-events:none;z-index:1000000;animation:mfPulse 1400ms ease-out infinite;transition:opacity 0.3s ease;}',
+            '.mf-beacon{position:fixed;width:16px;height:16px;border-radius:9999px;background:var(--mf-brand-background,var(--mf-theme-primary,#0d6efd));box-shadow:0 0 0 0 var(--mf-brand-pulse-start,rgba(59,130,246,.65));pointer-events:none;z-index:1000000;animation:mfPulse 1400ms ease-out infinite;transition:opacity 0.3s ease;}',
             '.mf-beacon.hidden{opacity:0;}',
-            '@keyframes mfPulse{0%{box-shadow:0 0 0 0 var(--ms-brand-pulse-start,rgba(59,130,246,.6))}70%{box-shadow:0 0 0 18px var(--ms-brand-pulse-end,rgba(59,130,246,0))}100%{box-shadow:0 0 0 0 var(--ms-brand-pulse-end,rgba(59,130,246,0))}}',
+            '@keyframes mfPulse{0%{box-shadow:0 0 0 0 var(--mf-brand-pulse-start,rgba(59,130,246,.6))}70%{box-shadow:0 0 0 18px var(--mf-brand-pulse-end,rgba(59,130,246,0))}100%{box-shadow:0 0 0 0 var(--mf-brand-pulse-end,rgba(59,130,246,0))}}',
             '.mf-tooltip{position:fixed;background:#1f2937;color:#fff;padding:8px 12px;border-radius:6px;z-index:1000001;font-size:13px;max-width:200px;box-shadow:0 4px 12px rgba(0,0,0,0.25);pointer-events:none;font-family:system-ui,-apple-system,sans-serif;}',
             '.mf-tooltip-box {position: fixed;background: #ffffff;color: #1f2937;padding: 16px 20px;border-radius: 8px;z-index: 1000001;font-size: 14px;max-width: 320px;min-width: 200px;box-shadow: 0 4px 20px rgba(0,0,0,0.15);pointer-events: auto;font-family: system-ui, -apple-system, sans-serif;line-height: 1.5;text-align: center;}',
             '.mf-tooltip-box.dark {background: #1f2937;color: #f9fafb;}',
@@ -692,7 +719,7 @@
         var st = document.createElement('style');
         st.id = 'modalflow-preview-styles';
         st.textContent = sdk._getPreviewStyles().join(' ');
-        document.head.appendChild(st);
+        (document.head || document.documentElement).appendChild(st);
     };
 
     sdk._getInlineModalflowScript = function () {
@@ -703,7 +730,7 @@
         const st = document.createElement('style');
         st.id = 'modalflow-preview-styles';
         st.textContent = [ ${previewStylesStr} ].join(' ');
-        document.head.appendChild(st);
+        (document.head || document.documentElement).appendChild(st);
       })();
       (function injectThemeAndBrand(){
         function hexToRgba(hex, alpha) {
@@ -728,30 +755,30 @@
             sd.id = 'modalflow-theme-defaults';
             sd.textContent = [
               ':root{',
-              '  --ms-theme-background:#ffffff;',
-              '  --ms-theme-background-secondary:#f8fafc;',
-              '  --ms-theme-text-primary:#111827;',
-              '  --ms-theme-text-secondary:#667085;',
-              '  --ms-theme-question-text:#111827;',
-              '  --ms-theme-text-on-primary:#ffffff;',
-              '  --ms-theme-border:#eaecf0;',
-              '  --ms-theme-shadow:rgba(0,0,0,0.15);',
-              '  --ms-theme-close-hover-bg:rgba(0,0,0,0.08);',
-              '  --ms-theme-option-bg:#f8fafc;',
-              '  --ms-theme-option-bg-active:rgba(13,110,253,0.12);',
+              '  --mf-theme-background:#ffffff;',
+              '  --mf-theme-background-secondary:#f8fafc;',
+              '  --mf-theme-text-primary:#111827;',
+              '  --mf-theme-text-secondary:#667085;',
+              '  --mf-theme-question-text:#111827;',
+              '  --mf-theme-text-on-primary:#ffffff;',
+              '  --mf-theme-border:#eaecf0;',
+              '  --mf-theme-shadow:rgba(0,0,0,0.15);',
+              '  --mf-theme-close-hover-bg:rgba(0,0,0,0.08);',
+              '  --mf-theme-option-bg:#f8fafc;',
+              '  --mf-theme-option-bg-active:rgba(13,110,253,0.12);',
               '}',
               ':root[data-mf-theme="dark"]{',
-              '  --ms-theme-background:#111827;',
-              '  --ms-theme-background-secondary:#1f2937;',
-              '  --ms-theme-text-primary:#f9fafb;',
-              '  --ms-theme-text-secondary:rgba(255,255,255,0.72);',
-              '  --ms-theme-question-text:#ffffff;',
-              '  --ms-theme-text-on-primary:#ffffff;',
-              '  --ms-theme-border:rgba(255,255,255,0.16);',
-              '  --ms-theme-shadow:rgba(0,0,0,0.4);',
-              '  --ms-theme-close-hover-bg:rgba(255,255,255,0.14);',
-              '  --ms-theme-option-bg:rgba(255,255,255,0.06);',
-              '  --ms-theme-option-bg-active:rgba(255,255,255,0.10);',
+              '  --mf-theme-background:#111827;',
+              '  --mf-theme-background-secondary:#1f2937;',
+              '  --mf-theme-text-primary:#f9fafb;',
+              '  --mf-theme-text-secondary:rgba(255,255,255,0.72);',
+              '  --mf-theme-question-text:#ffffff;',
+              '  --mf-theme-text-on-primary:#ffffff;',
+              '  --mf-theme-border:rgba(255,255,255,0.16);',
+              '  --mf-theme-shadow:rgba(0,0,0,0.4);',
+              '  --mf-theme-close-hover-bg:rgba(255,255,255,0.14);',
+              '  --mf-theme-option-bg:rgba(255,255,255,0.06);',
+              '  --mf-theme-option-bg-active:rgba(255,255,255,0.10);',
               '  color-scheme: dark;',
               '}'
             ].join('');
@@ -763,7 +790,7 @@
           var st = document.createElement('style');
           st.id = 'modalflow-theme-vars';
           st.textContent = setup.themeCSS;
-          document.head.appendChild(st);
+          (document.head || document.documentElement).appendChild(st);
         }
         
         try {
@@ -798,20 +825,20 @@
         if (!document.getElementById('modalflow-brand-vars') && setup.brandColors) {
           var b = setup.brandColors;
           var parts = [];
-          if (b.background) parts.push('--ms-brand-background:' + b.background);
-          if (b.backgroundHover) parts.push('--ms-brand-background-hover:' + b.backgroundHover);
-          if (b.backgroundClick) parts.push('--ms-brand-background-active:' + b.backgroundClick);
-          if (b.text) parts.push('--ms-brand-text:' + b.text);
+          if (b.background) parts.push('--mf-brand-background:' + b.background);
+          if (b.backgroundHover) parts.push('--mf-brand-background-hover:' + b.backgroundHover);
+          if (b.backgroundClick) parts.push('--mf-brand-background-active:' + b.backgroundClick);
+          if (b.text) parts.push('--mf-brand-text:' + b.text);
           if (b.background) {
-            parts.push('--ms-brand-pulse-start:' + hexToRgba(b.background, 0.6));
-            parts.push('--ms-brand-pulse-end:' + hexToRgba(b.background, 0));
-            parts.push('--ms-brand-background-subtle:' + hexToRgba(b.background, 0.12));
+            parts.push('--mf-brand-pulse-start:' + hexToRgba(b.background, 0.6));
+            parts.push('--mf-brand-pulse-end:' + hexToRgba(b.background, 0));
+            parts.push('--mf-brand-background-subtle:' + hexToRgba(b.background, 0.12));
           }
           if (parts.length) {
             var sb = document.createElement('style');
             sb.id = 'modalflow-brand-vars';
             sb.textContent = ':root{' + parts.join(';') + '}';
-            document.head.appendChild(sb);
+            (document.head || document.documentElement).appendChild(sb);
           }
         }
       })();
@@ -1073,8 +1100,8 @@
   
   async function getElementSelectorFromConfig(config, options = {}) {
       const maxRetries = options.maxRetries || 15;
-      const retryDelay = options.retryDelay || 300;
-      const timeout = options.timeout || 10000;
+      const retryDelay = options.retryDelay || 30;
+      const timeout = options.timeout || 300;
   
       await waitForDOMReady();
       await new Promise(resolve => setTimeout(resolve, 200));
@@ -1203,7 +1230,6 @@
               const windowHeight = window.innerHeight || document.documentElement.clientHeight;
               const windowWidth = window.innerWidth || document.documentElement.clientWidth;
   
-              // Check for full visibility (no margin) when requireFullVisibility is true
               const requireFullVisibility = options.requireFullVisibility !== false;
               const isFullyVisible = requireFullVisibility ? (
                   rect.top >= 0 &&
@@ -1218,7 +1244,6 @@
               );
   
               if (isFullyVisible) {
-                  // Element already visible, wait for layout update
                   requestAnimationFrame(() => {
                       requestAnimationFrame(() => {
                           resolve(true);
@@ -1349,7 +1374,6 @@
           return false;
       }
   }
-  // Find scrollable parent container
   function findScrollableContainer(element) {
       if (!element) return window;
   
@@ -1369,7 +1393,6 @@
       return window;
   }
   
-  // Get current scroll position
   function getCurrentScrollPosition(container) {
       if (container && container !== window) {
           return {
@@ -1383,7 +1406,6 @@
       };
   }
   
-  // Initialize scroll tracking for an element
   function initScrollTracking(targetElement) {
       if (!__scrollTracking.scrollableContainer) {
           __scrollTracking.scrollableContainer = findScrollableContainer(targetElement);
@@ -1396,7 +1418,6 @@
       }
   }
   
-  // Calculate position with scroll adjustment
   function getPositionWithScroll(targetElement, useAbsoluteCoords, savedCoords) {
       const currentScroll = getCurrentScrollPosition(__scrollTracking.scrollableContainer);
   
@@ -1432,7 +1453,6 @@
   
       return null;
   }
-  // Function to check conditions for showing beacon/tooltip
   function checkElementConditions(conditions) {
       try {
           if (!Array.isArray(conditions) || conditions.length === 0) return true;
@@ -1488,7 +1508,6 @@
       }
   }
   
-  // Function to show beacon on element
   function showBeaconOnElement(element, position) {
       try {
           if (!element) return;
@@ -1861,7 +1880,6 @@
       }
   }
   
-  // Function to re-enable scrolling on the page
   function enableScroll() {
       if (!__scrollLockEnabled) return; // Already enabled
   
@@ -1927,7 +1945,7 @@
                       var sc = document.createElement('script');
                       sc.setAttribute('data-mf-confetti', 'inline');
                       sc.text = atob(__MF_CONFETTI_INLINE_B64);
-                      document.head.appendChild(sc);
+                      (document.head || document.documentElement).appendChild(sc);
                       if (typeof ConfettiGenerator === 'function' || typeof confetti === 'function') { resolve(true); return; }
                   }
               } catch (_) { /* ignore */ }
@@ -1943,7 +1961,7 @@
                   link.setAttribute('crossorigin', '');
                   link.setAttribute('href', url);
                   link.setAttribute('data-mf-confetti-preload', '1');
-                  document.head.appendChild(link);
+                  (document.head || document.documentElement).appendChild(link);
               }
               var s = document.createElement('script');
               s.async = true;
@@ -1952,7 +1970,7 @@
               s.setAttribute('data-mf-confetti', '1');
               s.onload = function () { resolve(true); };
               s.onerror = function () { resolve(false); };
-              document.head.appendChild(s);
+              (document.head || document.documentElement).appendChild(s);
           } catch (_) { 
               resolve(false); 
           }
@@ -2060,7 +2078,6 @@
       } catch (_) { return undefined; }
   }
   
-  // Auto-start evaluator
   function evaluateAutoStartCondition(cond) {
       try {
           const type = String(cond && cond.type || '').toLowerCase();
@@ -2336,7 +2353,6 @@
           if (!beacon) {
               return;
           }
-
           const hideBeaconConfig = beacon.hideBeacon;
           if (hideBeaconConfig && (hideBeaconConfig === true || (hideBeaconConfig.value === true))) {
               const triggers = (hideBeaconConfig.triggers || hideBeaconConfig.conditions || []);
@@ -2576,6 +2592,7 @@
   
                       return vertInView && horInView;
                   } else if (virtualRect) {
+                      // Check if coordinates are in viewport
                       const rect = getTargetRect();
                       if (!rect) return false;
                       const windowHeight = window.innerHeight || document.documentElement.clientHeight;
@@ -2820,7 +2837,6 @@
       try { overlayRoot.innerHTML = ''; } catch (_) { }
       const vw = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0);
       const vh = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0);
-
       const toNums = (val) => {
           if (Array.isArray(val)) return val.map(v => Number(v) || 0);
           const n = Number(val);
@@ -2980,7 +2996,7 @@
       try {
           enableScroll();
           const wrap = createEl('div', { style: 'position:fixed; inset:0; display:flex; align-items:center; justify-content:center; z-index:1000002; background:rgba(0,0,0,.25);' });
-          const box = createEl('div', { style: 'background:var(--ms-theme-background,#fff); border-radius:12px; padding:20px 24px; min-width:260px; max-width:90vw; box-shadow:0 10px 30px rgba(0,0,0,.25); text-align:center;' });
+          const box = createEl('div', { style: 'background:var(--mf-theme-background,#fff); border-radius:12px; padding:20px 24px; min-width:260px; max-width:90vw; box-shadow:0 10px 30px rgba(0,0,0,.25); text-align:center;' });
           const h = createEl('div', { style: 'font-size:22px; font-weight:600; margin-bottom:12px;' }, 'Menu');
           const mkBtn = (txt) => createEl('button', { class: 'mf-btn', style: 'display:block; width:100%; margin:10px 0; font-size:16px;' }, txt);
           const closeBtn = mkBtn('Close guide');
@@ -3444,7 +3460,6 @@
                                   }
                               } catch (e) {
                                   console.warn('[Modalflow] Error with buildSpecificSelector:', selObj.selector, e);
-                                  // Continue to next selector
                               }
                           }
                       }
@@ -3695,7 +3710,6 @@
                       overlay.style.background = 'transparent';
                       overlay.style.pointerEvents = 'none';
                       
-                      // Get fresh coordinates after layout update
                       const tRect = targetElement.getBoundingClientRect();
   
                       if (addBackdrop) {
@@ -4006,11 +4020,11 @@
                   const __mfOptionBgActiveFallback = __mfIsDarkTheme ? 'rgba(255,255,255,0.10)' : 'rgba(13,110,253,0.12)';
                   const __mfInputBgFallback = __mfIsDarkTheme ? 'rgba(255,255,255,0.06)' : '#ffffff';
 
-                  questionWrap = createEl('div', { style: 'margin-top:16px; width:100%; color:var(--ms-theme-text-primary,' + __mfTextPrimaryFallback + ');' });
+                  questionWrap = createEl('div', { style: 'margin-top:16px; width:100%; color:var(--mf-theme-text-primary,' + __mfTextPrimaryFallback + ');' });
   
                   if (questionText && String(questionText).trim()) {
                       const qLabel = createEl('label', {
-                          style: 'display:block; margin-bottom:8px; font-weight:500; color:var(--ms-theme-question-text, var(--ms-theme-text-primary,' + __mfTextPrimaryFallback + '));'
+                          style: 'display:block; margin-bottom:8px; font-weight:500; color:var(--mf-theme-question-text, var(--mf-theme-text-primary,' + __mfTextPrimaryFallback + '));'
                       }, String(questionText).trim());
                       questionWrap.appendChild(qLabel);
                   }
@@ -4040,7 +4054,7 @@
   
                       if (allowMultiple && (minSelection > 0 || maxSelection)) {
                           const helperText = createEl('div', {
-                              style: 'font-size:14px; color:var(--ms-theme-text-secondary,' + __mfTextSecondaryFallback + '); margin-bottom:8px;'
+                              style: 'font-size:14px; color:var(--mf-theme-text-secondary,' + __mfTextSecondaryFallback + '); margin-bottom:8px;'
                           });
                           let helpMsg = '';
                           if (minSelection > 0 && maxSelection) {
@@ -4056,7 +4070,7 @@
   
                       displayOptions.forEach((opt, idx) => {
                           const optionDiv = createEl('div', {
-                              style: 'display:flex; align-items:center; padding:10px 12px; border:1px solid var(--ms-theme-border,' + __mfBorderFallback + '); border-radius:8px; background:var(--ms-theme-option-bg,' + __mfOptionBgFallback + '); cursor:pointer; transition:all 0.2s; color:var(--ms-theme-text-primary,' + __mfTextPrimaryFallback + ');'
+                              style: 'display:flex; align-items:center; padding:10px 12px; border:1px solid var(--mf-theme-border,' + __mfBorderFallback + '); border-radius:8px; background:var(--mf-theme-option-bg,' + __mfOptionBgFallback + '); cursor:pointer; transition:all 0.2s; color:var(--mf-theme-text-primary,' + __mfTextPrimaryFallback + ');'
                           });
   
                           const radio = createEl('input', {
@@ -4064,12 +4078,12 @@
                               name: 'question-option',
                               id: 'opt-' + idx,
                               value: opt.value || '',
-                              style: 'margin-right:8px; cursor:pointer; pointer-events:none; accent-color:var(--ms-brand-background,var(--ms-theme-primary,#0d6efd));'
+                              style: 'margin-right:8px; cursor:pointer; pointer-events:none; accent-color:var(--mf-brand-background,var(--mf-theme-primary,#0d6efd));'
                           });
 
                           const label = createEl('label', {
                               for: 'opt-' + idx,
-                              style: 'margin:0; cursor:pointer; flex:1; pointer-events:none; user-select:none; color:var(--ms-theme-text-primary,' + __mfTextPrimaryFallback + ');'
+                              style: 'margin:0; cursor:pointer; flex:1; pointer-events:none; user-select:none; color:var(--mf-theme-text-primary,' + __mfTextPrimaryFallback + ');'
                           }, opt.labelValue || opt.value || '');
 
                           radio.onchange = () => {
@@ -4085,22 +4099,22 @@
                                           return;
                                       }
                                       selectedValues.add(opt.value);
-                                      optionDiv.style.borderColor = 'var(--ms-brand-background,var(--ms-theme-primary))';
-                                      optionDiv.style.background = 'var(--ms-theme-option-bg-active,' + __mfOptionBgActiveFallback + ')';
+                                      optionDiv.style.borderColor = 'var(--mf-brand-background,var(--mf-theme-primary))';
+                                      optionDiv.style.background = 'var(--mf-theme-option-bg-active,' + __mfOptionBgActiveFallback + ')';
                                   } else {
                                       selectedValues.delete(opt.value);
-                                      optionDiv.style.borderColor = 'var(--ms-theme-border,' + __mfBorderFallback + ')';
-                                      optionDiv.style.background = 'var(--ms-theme-option-bg,' + __mfOptionBgFallback + ')';
+                                      optionDiv.style.borderColor = 'var(--mf-theme-border,' + __mfBorderFallback + ')';
+                                      optionDiv.style.background = 'var(--mf-theme-option-bg,' + __mfOptionBgFallback + ')';
                                   }
                                   selectedValue = Array.from(selectedValues);
                               } else {
                                   selectedValue = opt.value;
                                     optionsContainer.querySelectorAll('div').forEach(d => {
-                                      d.style.borderColor = 'var(--ms-theme-border,' + __mfBorderFallback + ')';
-                                      d.style.background = 'var(--ms-theme-option-bg,' + __mfOptionBgFallback + ')';
+                                      d.style.borderColor = 'var(--mf-theme-border,' + __mfBorderFallback + ')';
+                                      d.style.background = 'var(--mf-theme-option-bg,' + __mfOptionBgFallback + ')';
                                   });
-                                  optionDiv.style.borderColor = 'var(--ms-brand-background,var(--ms-theme-primary))';
-                                  optionDiv.style.background = 'var(--ms-theme-option-bg-active,' + __mfOptionBgActiveFallback + ')';
+                                  optionDiv.style.borderColor = 'var(--mf-brand-background,var(--mf-theme-primary))';
+                                  optionDiv.style.background = 'var(--mf-theme-option-bg-active,' + __mfOptionBgActiveFallback + ')';
                               }
                               if (updateSubmitButtonState) {
                                   updateSubmitButtonState();
@@ -4115,18 +4129,18 @@
   
                       if (enableOther) {
                           const otherDiv = createEl('div', {
-                              style: 'display:flex; align-items:center; gap:8px; padding:10px 12px; border:1px solid var(--ms-theme-border,' + __mfBorderFallback + '); border-radius:8px; background:var(--ms-theme-option-bg,' + __mfOptionBgFallback + '); color:var(--ms-theme-text-primary,' + __mfTextPrimaryFallback + ');'
+                              style: 'display:flex; align-items:center; gap:8px; padding:10px 12px; border:1px solid var(--mf-theme-border,' + __mfBorderFallback + '); border-radius:8px; background:var(--mf-theme-option-bg,' + __mfOptionBgFallback + '); color:var(--mf-theme-text-primary,' + __mfTextPrimaryFallback + ');'
                           });
                           const otherRadio = createEl('input', {
                               type: allowMultiple ? 'checkbox' : 'radio',
                               name: 'question-option',
                               id: 'opt-other',
-                              style: 'margin-right:8px; accent-color:var(--ms-brand-background,var(--ms-theme-primary,#0d6efd));'
+                              style: 'margin-right:8px; accent-color:var(--mf-brand-background,var(--mf-theme-primary,#0d6efd));'
                           });
                           const otherInput = createEl('input', {
                               type: 'text',
                               placeholder: otherPlaceholder + '...',
-                              style: 'flex:1; padding:8px 12px; border:1px solid var(--ms-theme-border,' + __mfBorderFallback + '); border-radius:6px; background:var(--ms-theme-background,' + __mfInputBgFallback + '); color:var(--ms-theme-text-primary,' + __mfTextPrimaryFallback + ');'
+                              style: 'flex:1; padding:8px 12px; border:1px solid var(--mf-theme-border,' + __mfBorderFallback + '); border-radius:6px; background:var(--mf-theme-background,' + __mfInputBgFallback + '); color:var(--mf-theme-text-primary,' + __mfTextPrimaryFallback + ');'
                           });
   
                           otherRadio.onchange = () => {
@@ -4142,12 +4156,12 @@
                                           return;
                                       }
                                       selectedValues.add(otherInput.value || 'Other');
-                                      otherDiv.style.borderColor = 'var(--ms-brand-background,var(--ms-theme-primary))';
-                                      otherDiv.style.background = 'var(--ms-theme-option-bg-active,' + __mfOptionBgActiveFallback + ')';
+                                      otherDiv.style.borderColor = 'var(--mf-brand-background,var(--mf-theme-primary))';
+                                      otherDiv.style.background = 'var(--mf-theme-option-bg-active,' + __mfOptionBgActiveFallback + ')';
                                   } else {
                                       selectedValues.delete(otherInput.value || 'Other');
-                                      otherDiv.style.borderColor = 'var(--ms-theme-border,' + __mfBorderFallback + ')';
-                                      otherDiv.style.background = 'var(--ms-theme-option-bg,' + __mfOptionBgFallback + ')';
+                                      otherDiv.style.borderColor = 'var(--mf-theme-border,' + __mfBorderFallback + ')';
+                                      otherDiv.style.background = 'var(--mf-theme-option-bg,' + __mfOptionBgFallback + ')';
                                   }
                                   selectedValue = Array.from(selectedValues);
                               } else {
@@ -4196,23 +4210,23 @@
   
                       const npsContainer = createEl('div', { style: 'display:flex; flex-direction:column; gap:12px; margin-top:8px;' });
                       const scaleWrapper = createEl('div', {
-                          style: 'border:1px solid var(--ms-theme-border,' + __mfBorderFallback + '); border-radius:8px; padding:4px; background:var(--ms-theme-option-bg,' + __mfOptionBgFallback + '); display:flex;'
+                          style: 'border:1px solid var(--mf-theme-border,' + __mfBorderFallback + '); border-radius:8px; padding:4px; background:var(--mf-theme-option-bg,' + __mfOptionBgFallback + '); display:flex;'
                       });
                       const scaleContainer = createEl('div', { style: 'display:flex; gap:0; width:100%;' });
   
                       for (let i = 0; i <= 10; i++) {
                           const btn = createEl('button', {
-                              style: 'flex:1;min-width:32px; padding:clamp(6px, 1.5vw, 10px) 0; border:none; border-right:' + (i < 10 ? '1px solid var(--ms-theme-border,' + __mfBorderFallback + ')' : 'none') + '; background:transparent; cursor:pointer; font-weight:500; font-size:14px; color:var(--ms-theme-text-secondary,' + __mfTextSecondaryFallback + '); transition:all 0.2s;'
+                              style: 'flex:1;min-width:32px; padding:clamp(6px, 1.5vw, 10px) 0; border:none; border-right:' + (i < 10 ? '1px solid var(--mf-theme-border,' + __mfBorderFallback + ')' : 'none') + '; background:transparent; cursor:pointer; font-weight:500; font-size:14px; color:var(--mf-theme-text-secondary,' + __mfTextSecondaryFallback + '); transition:all 0.2s;'
                           }, String(i));
   
                           btn.onclick = () => {
                               selectedValue = i;
                               scaleContainer.querySelectorAll('button').forEach(b => {
                                   b.style.background = 'transparent';
-                                  b.style.color = 'var(--ms-theme-text-secondary,' + __mfTextSecondaryFallback + ')';
+                                  b.style.color = 'var(--mf-theme-text-secondary,' + __mfTextSecondaryFallback + ')';
                               });
-                              btn.style.background = 'var(--ms-brand-background,var(--ms-theme-primary))';
-                              btn.style.color = 'var(--ms-brand-text,var(--ms-theme-text-on-primary,#fff))';
+                              btn.style.background = 'var(--mf-brand-background,var(--mf-theme-primary))';
+                              btn.style.color = 'var(--mf-brand-text,var(--mf-theme-text-on-primary,#fff))';
                               requestAnimationFrame(() => {
                                   setTimeout(() => {
                                       executeQuestionActions();
@@ -4222,7 +4236,7 @@
   
                               btn.onmouseenter = () => {
                                   if (selectedValue !== i) {
-                                      btn.style.background = 'var(--ms-theme-option-bg-active,' + __mfOptionBgActiveFallback + ')';
+                                      btn.style.background = 'var(--mf-theme-option-bg-active,' + __mfOptionBgActiveFallback + ')';
                                   }
                               };
 
@@ -4236,7 +4250,7 @@
                       }
                       scaleWrapper.appendChild(scaleContainer);
                       const labelsContainer = createEl('div', {
-                          style: 'display:flex; justify-content:space-between; font-size:13px; color:var(--ms-theme-text-secondary,' + __mfTextSecondaryFallback + ');'
+                          style: 'display:flex; justify-content:space-between; font-size:13px; color:var(--mf-theme-text-secondary,' + __mfTextSecondaryFallback + ');'
                       });
   
                       const leftLabel = createEl('span', {}, label1);
@@ -4252,7 +4266,6 @@
                       questionWrap.appendChild(npsContainer);
                   }
   
-                  // SCALE RANGE
                   else if (questionType === 'scaleRange') {
                       const scale = q.scale || {};
                       const from = parseInt(scale.from || '1');
@@ -4269,19 +4282,19 @@
 
                       for (let i = from; i <= to; i++) {
                           const btn = createEl('button', {
-                              style: 'min-width:50px; padding:12px; border:1px solid var(--ms-theme-border); border-radius:6px; background:var(--ms-theme-option-bg); cursor:pointer; font-weight:500; transition:all 0.2s; color: var(--ms-theme-text-secondary);'
+                              style: 'min-width:50px; padding:12px; border:1px solid var(--mf-theme-border); border-radius:6px; background:var(--mf-theme-option-bg); cursor:pointer; font-weight:500; transition:all 0.2s; color: var(--mf-theme-text-secondary);'
                           }, String(i));
   
                           btn.onclick = () => {
                               selectedValue = i;
                               buttonsContainer.querySelectorAll('button').forEach(b => {
-                                  b.style.background = 'var(--ms-theme-option-bg)';
-                                  b.style.borderColor = 'var(--ms-theme-border)';
-                                  b.style.color = 'var(--ms-theme-text-secondary)';
+                                  b.style.background = 'var(--mf-theme-option-bg)';
+                                  b.style.borderColor = 'var(--mf-theme-border)';
+                                  b.style.color = 'var(--mf-theme-text-secondary)';
                               });
-                              btn.style.background = 'var(--ms-brand-background,var(--ms-theme-primary))';
-                              btn.style.borderColor = 'var(--ms-brand-background,var(--ms-theme-primary))';
-                              btn.style.color = 'var(--ms-brand-text,var(--ms-theme-text-on-primary,#fff))';
+                              btn.style.background = 'var(--mf-brand-background,var(--mf-theme-primary))';
+                              btn.style.borderColor = 'var(--mf-brand-background,var(--mf-theme-primary))';
+                              btn.style.color = 'var(--mf-brand-text,var(--mf-theme-text-on-primary,#fff))';
                               requestAnimationFrame(() => {
                                   setTimeout(() => {
                                       executeQuestionActions();
@@ -4295,7 +4308,7 @@
                       scaleContainer.appendChild(buttonsContainer);
                       if (hasLabels) {
                           const labelsContainer = createEl('div', {
-                              style: 'display:flex; justify-content:space-between; font-size:12px; color:var(--ms-theme-text-secondary);'
+                              style: 'display:flex; justify-content:space-between; font-size:12px; color:var(--mf-theme-text-secondary);'
                           });
                           labelsContainer.innerHTML = '<span>' + label1 + '</span><span>' + label2 + '</span><span>' + label3 + '</span>';
                           scaleContainer.appendChild(labelsContainer);
@@ -4315,7 +4328,7 @@
 
                       for (let i = 1; i <= maxStars; i++) {
                           const starBtn = createEl('button', {
-                              style: 'background:none; border:none; cursor:pointer; font-size:32px; transition:all 0.2s; color:var(--ms-theme-text-secondary);'
+                              style: 'background:none; border:none; cursor:pointer; font-size:32px; transition:all 0.2s; color:var(--mf-theme-text-secondary);'
                           });
                           starBtn.innerHTML = '\u2606';
                           starBtn.dataset.value = i;
@@ -4324,7 +4337,7 @@
                               selectedValue = i;
                               starsDiv.querySelectorAll('button').forEach((s, idx) => {
                                   s.innerHTML = idx < i ? '\u2605' : '\u2606';
-                                  s.style.color = idx < i ? 'var(--ms-brand-background,var(--ms-theme-primary))' : 'var(--ms-theme-text-secondary)';
+                                  s.style.color = idx < i ? 'var(--mf-brand-background,var(--mf-theme-primary))' : 'var(--mf-theme-text-secondary)';
                               });
                               requestAnimationFrame(() => {
                                   setTimeout(() => {
@@ -4336,7 +4349,7 @@
                           starBtn.onmouseenter = () => {
                               starsDiv.querySelectorAll('button').forEach((s, idx) => {
                                   s.innerHTML = idx < i ? '\u2605' : '\u2606';
-                                  s.style.color = idx < i ? 'var(--ms-brand-background,var(--ms-theme-primary))' : 'var(--ms-theme-text-secondary)';
+                                  s.style.color = idx < i ? 'var(--mf-brand-background,var(--mf-theme-primary))' : 'var(--mf-theme-text-secondary)';
                               });
                           };
 
@@ -4344,18 +4357,18 @@
                               if (selectedValue) {
                                   starsDiv.querySelectorAll('button').forEach((s, idx) => {
                                       s.innerHTML = idx < selectedValue ? '\u2605' : '\u2606';
-                                      s.style.color = idx < selectedValue ? 'var(--ms-brand-background,var(--ms-theme-primary))' : 'var(--ms-theme-text-secondary)';
+                                      s.style.color = idx < selectedValue ? 'var(--mf-brand-background,var(--mf-theme-primary))' : 'var(--mf-theme-text-secondary)';
                                   });
                               } else {
                                   starsDiv.querySelectorAll('button').forEach(s => {
                                       s.innerHTML = '\u2606';
-                                      s.style.color = 'var(--ms-theme-text-secondary)';
+                                      s.style.color = 'var(--mf-theme-text-secondary)';
                                   });
                               }
                           };
 
                           const numberLabel = createEl('div', {
-                              style: 'text-align:center; font-size:12px; color:var(--ms-theme-text-secondary,#6b7280); margin-top:-4px;'
+                              style: 'text-align:center; font-size:12px; color:var(--mf-theme-text-secondary,#6b7280); margin-top:-4px;'
                           }, String(i));
 
                           const starWrapper = createEl('div', { style: 'display:flex; flex-direction:column; align-items:center;' });
@@ -4368,7 +4381,7 @@
                       
                       if (hasLabels) {
                           const labelsContainer = createEl('div', {
-                              style: 'display:flex; justify-content:space-between; width:100%; font-size:12px; color:var(--ms-theme-text-secondary,#6b7280);'
+                              style: 'display:flex; justify-content:space-between; width:100%; font-size:12px; color:var(--mf-theme-text-secondary,#6b7280);'
                           });
                           
                           const labelSpans = [];
@@ -4392,14 +4405,14 @@
                   else if (questionType === 'multi-line-text') {
                       input = createEl('textarea', {
                           placeholder: placeholder,
-                          style: 'width:100%; padding:10px 12px; border:1px solid #d1d5db; border-radius:8px; outline:none; resize:vertical; min-height:80px; font-family:inherit; box-sizing:border-box; color:var(--ms-theme-text-primary);background:var(--ms-theme-background);'
+                          style: 'width:100%; padding:10px 12px; border:1px solid #d1d5db; border-radius:8px; outline:none; resize:vertical; min-height:80px; font-family:inherit; box-sizing:border-box; color:var(--mf-theme-text-primary);background:var(--mf-theme-background);'
                       });
                       questionWrap.appendChild(input);
                   } else {
                       input = createEl('input', {
                           type: 'text',
                           placeholder: placeholder,
-                          style: 'width:100%; padding:10px 12px; border:1px solid #d1d5db; border-radius:8px; outline:none; box-sizing:border-box; color:var(--ms-theme-text-primary);background:var(--ms-theme-background);'
+                          style: 'width:100%; padding:10px 12px; border:1px solid #d1d5db; border-radius:8px; outline:none; box-sizing:border-box; color:var(--mf-theme-text-primary);background:var(--mf-theme-background);'
                       });
                       questionWrap.appendChild(input);
                   }
@@ -4576,7 +4589,6 @@
   
                ab.filter(b => b && b.type === 'button').forEach(btnBlock => {
       try {
-          // New format only
           const rawLabel = btnBlock.text;
           const buttonStyle = btnBlock.style;
           const buttonActions = Array.isArray(btnBlock.actions) ? btnBlock.actions : [];
@@ -4699,6 +4711,56 @@
               stepBox.appendChild(navActions);
           }
 
+          function findPopoverMount(target) {
+              try {
+                  if (!target || !target.closest) return null;
+                  const sel = [
+                      // Common ARIA containers
+                      '[role="dialog"]',
+                      '[role="menu"]',
+                      '[role="listbox"]',
+                      '[role="tree"]',
+                      '[role="grid"]',
+                      'dialog[open]',
+                      // HTML Popover API
+                      '[popover]',
+                      // Popular libraries / patterns
+                      '.popover',
+                      // Prefer the root/container over the inner paper to avoid padding-box offsets.
+                      '.MuiPopover-root',
+                      '.MuiMenu-root',
+                      '.MuiPopover-paper',
+                      '.MuiMenu-paper',
+                      '.MuiModal-root',
+                      '.MuiDialog-root',
+                      '.MuiDialog-container',
+                      '.ant-popover',
+                      '.ant-dropdown',
+                      '.ant-tooltip',
+                      '.cdk-overlay-pane',
+                      '.cdk-overlay-container',
+                      '.mat-menu-panel',
+                      '.mat-mdc-menu-panel',
+                      '.mat-mdc-dialog-container',
+                      '.mat-mdc-autocomplete-panel',
+                      '.chakra-popover__content',
+                      '[data-reach-popover]',
+                      '[data-state="open"]',
+                      '[data-headlessui-state="open"]',
+                      '.tippy-box',
+                      '.tippy-content',
+                      'ion-popover',
+                      'sl-popover',
+                      '[data-radix-popper-content-wrapper]',
+                      '[data-popper-placement]'
+                  ].join(',');
+                  const mount = target.closest(sel);
+                  if (mount && mount.ownerDocument && mount.ownerDocument.documentElement && mount.ownerDocument.documentElement.contains(mount)) {
+                      return mount;
+                  }
+              } catch (_) { }
+              return null;
+          }
           function placeNearTarget(target, box, type, position, absXY) {
               const rect = target.getBoundingClientRect();
               box.style.position = "fixed";
@@ -4711,6 +4773,45 @@
                   if (!document.body.contains(box)) {
                       document.body.appendChild(box);
                   }
+
+                  let frameLeft = 0, frameTop = 0, frameW = vw, frameH = vh;
+                  try {
+                      if (mount && mount !== document.body && mount !== document.documentElement) {
+                          let cb = mount;
+                          while (cb && cb !== document.body && cb !== document.documentElement) {
+                              const cs = window.getComputedStyle ? getComputedStyle(cb) : null;
+                              const willChange = cs && cs.willChange ? String(cs.willChange) : '';
+                              const hasTransform = cs && cs.transform && cs.transform !== 'none';
+                              const hasPerspective = cs && cs.perspective && cs.perspective !== 'none';
+                              const hasFilter = cs && cs.filter && cs.filter !== 'none';
+                              const hasContainPaint = cs && cs.contain && String(cs.contain).indexOf('paint') >= 0;
+                              const hasWillChange = willChange && willChange.indexOf('transform') >= 0;
+                              if (hasTransform || hasPerspective || hasFilter || hasContainPaint || hasWillChange) {
+                                  const r = cb.getBoundingClientRect();
+                                  if (r && Number.isFinite(r.left) && Number.isFinite(r.top) && r.width > 0 && r.height > 0) {
+                                      let bl = 0, bt = 0, br = 0, bb = 0;
+                                      try {
+                                          const cs2 = window.getComputedStyle ? getComputedStyle(cb) : null;
+                                          bl = cs2 ? parseFloat(cs2.borderLeftWidth || '0') : 0;
+                                          bt = cs2 ? parseFloat(cs2.borderTopWidth || '0') : 0;
+                                          br = cs2 ? parseFloat(cs2.borderRightWidth || '0') : 0;
+                                          bb = cs2 ? parseFloat(cs2.borderBottomWidth || '0') : 0;
+                                          if (!Number.isFinite(bl)) bl = 0;
+                                          if (!Number.isFinite(bt)) bt = 0;
+                                          if (!Number.isFinite(br)) br = 0;
+                                          if (!Number.isFinite(bb)) bb = 0;
+                                      } catch (_) { bl = bt = br = bb = 0; }
+                                      frameLeft = r.left + bl;
+                                      frameTop = r.top + bt;
+                                      frameW = Math.max(0, r.width - bl - br);
+                                      frameH = Math.max(0, r.height - bt - bb);
+                                  }
+                                  break;
+                              }
+                              cb = cb.parentElement;
+                          }
+                      }
+                  } catch (_) { }
 
                   const boxW = box.offsetWidth;
                   const boxH = box.offsetHeight;
@@ -4922,12 +5023,12 @@
                       overlay.appendChild(stepBox);
                       
                       const avatarContainer = createEl('div', {
-                          style: 'position:fixed; left:20px; bottom:20px; z-index:1000000; width:56px; height:56px; border-radius:50%; background:var(--ms-theme-background-secondary, #f3f4f6); border:3px solid white; box-shadow:0 2px 8px rgba(0,0,0,0.15); display:flex; align-items:center; justify-content:center; overflow:hidden;'
+                          style: 'position:fixed; left:20px; bottom:20px; z-index:1000000; width:56px; height:56px; border-radius:50%; background:var(--mf-theme-background-secondary, #f3f4f6); border:3px solid white; box-shadow:0 2px 8px rgba(0,0,0,0.15); display:flex; align-items:center; justify-content:center; overflow:hidden;'
                       });
                       avatarContainer.setAttribute('data-modalflow-avatar', '1');
-                      const avatarUrl = 'https://hlptflowbuilder.s3.us-east-1.amazonaws.com/assets/avatar.svg';
+                      
                       const avatar = createEl('img', {
-                          src: avatarUrl,
+                          src: 'https://hlptflowbuilder.s3.us-east-1.amazonaws.com/assets/avatar.svg',
                           alt: 'Avatar',
                           style: 'width:56px; height:56px; border-radius:50%; object-fit:cover;'
                       });
@@ -5006,7 +5107,6 @@
       console.error('[Modalflow] Error parsing launcher_behaviour:', e);
   }
   
-  // Check for forced step from URL or localStorage (highest priority)
   let forcedStep = null;
   let urlParamFound = false;
   
@@ -5148,7 +5248,6 @@
             return;
         }
 
-        // Track active flowId for URL condition checking
         try {
             sessionStorage.setItem('modalflow_active_flow_id', flowId);
             window.__CURRENT_FLOW_ID__ = flowId;
@@ -5157,7 +5256,6 @@
 
         const executionKey = `__MF_EXECUTING_${flowId}`;
 
-        // Clear any stale execution locks (older than 2 seconds)
         if (window[executionKey]) {
             const lockTime = window[executionKey + '_TIME'];
             const now = Date.now();
@@ -5189,7 +5287,6 @@
                 return;
             }
 
-            // Handle specific step to start from
             if (data && data.startStepId) {
                 const flowSteps = sdk._flowObjects[flowId] || [];
                 const stepIndex = flowSteps.findIndex(step => String(step.id) === String(data.startStepId));
@@ -5304,6 +5401,7 @@
     };
 
     sdk._checkFlowAppUrl = function (flowId) {
+        try {
         const currentUrl = window.location.href;
         const flowSteps = sdk._flowObjects?.[flowId] || [];
 
@@ -5342,6 +5440,7 @@
             }
         }
         return false;
+        } catch (e) { return false; }
     };
 
     sdk._convertLauncherToOldFormat = function (newLauncher, flowData) {
@@ -5354,6 +5453,7 @@
                     conditions: []
                 },
                 zIndex: "576",
+                zIndexIsDefault: true,  // sentinel: no user-configured z-index override
                 theme: newLauncher.theme?.mode || "light",
                 themeCSS: newLauncher.theme?.customCSS || ""
             };
@@ -5378,6 +5478,7 @@
                     : Number(visibilityZIndex);
                 if (Number.isFinite(parsedZIndex)) {
                     launcherSetup.zIndex = String(parsedZIndex);
+                    launcherSetup.zIndexIsDefault = false; // real user override
                 }
             }
 
@@ -5519,7 +5620,6 @@
                 launcherBehaviour.value = tooltip.content || "";
                 launcherBehaviour.type = "show_tooltip"; // Set type to show_tooltip so it gets handled correctly
                 
-                // Add tooltip button actions
                 if (tooltip.blocks && Array.isArray(tooltip.blocks)) {
                     tooltip.blocks.forEach(block => {
                         if (block.type === "button" && block.action) {
@@ -5536,7 +5636,6 @@
                 }
             }
 
-            // Handle launcher action (if not already handled by tooltip)
             if (newLauncher.action === "start_flow" && !newLauncher.ui?.tooltip) {
                 launcherBehaviour.action.push({
                     id: Date.now(),
@@ -5632,7 +5731,6 @@
 
         const currentUrl = window.location.href;
 
-        // All conditions must pass (AND logic)
         for (const condition of conditions) {
             const conditionType = String(condition.condition_type || '').toLowerCase();
             const type = String(condition.type || '').toLowerCase();
@@ -5660,14 +5758,12 @@
 
                 let urlMatch = true;
 
-                // Check if URL matches any of the match_values patterns
                 if (matchValues.length > 0) {
                     urlMatch = matchValues.some(pattern => {
                         return sdk._matchesUrlPattern(pattern, currentUrl);
                     });
                 }
 
-                // Check if URL matches any of the no_match_values patterns (exclusions)
                 if (urlMatch && noMatchValues.length > 0) {
                     const excluded = noMatchValues.some(pattern => {
                         return sdk._matchesUrlPattern(pattern, currentUrl);
@@ -5690,7 +5786,6 @@
 
         if (setupConfig.urls_matching && setupConfig.urls_matching.length > 0) {
             const matches = setupConfig.urls_matching.some(pattern => {
-                // Skip empty strings - they shouldn't match anything
                 if (!pattern || pattern.trim() === '') return false;
                 return sdk._matchesUrlPattern(pattern, currentUrl);
             });
@@ -5702,7 +5797,6 @@
 
         if (setupConfig.exclude_urls_matching && setupConfig.exclude_urls_matching.length > 0) {
             const excluded = setupConfig.exclude_urls_matching.some(pattern => {
-                // Skip empty strings - they shouldn't exclude anything
                 if (!pattern || pattern.trim() === '') return false;
                 return sdk._matchesUrlPattern(pattern, currentUrl);
             });
@@ -5727,7 +5821,6 @@
         };
     };
 
-    // Get launcher elements by flow_ref (returns first matching launcher)
     sdk._getLauncherElementsByFlow = function (flowRef) {
         const launcherIds = sdk._launcherIdsByFlowRef?.[flowRef] || [];
         if (launcherIds.length > 0) {
@@ -5772,7 +5865,6 @@
         const posStyles = sdk._getPositionStyles(position, zIndex);
         Object.assign(launcher.style, posStyles);
 
-        // Add event listeners
         launcher.addEventListener('click', (e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -5791,7 +5883,7 @@
         document.body.appendChild(launcher);
     };
 
-    sdk._getPositionStyles = function (pos, zIndex) {
+    sdk._getPositionStyles = function (pos, setupConfig) {
         let vertical = 'bottom';
         let horizontal = 'right';
 
@@ -5810,13 +5902,7 @@
             left: parseFloat(pos.left) || 20
         };
 
-        let effectiveZIndex = '999998';
-        if (zIndex !== null && zIndex !== undefined) {
-            const parsedZIndex = typeof zIndex === 'string' ? parseFloat(zIndex) : Number(zIndex);
-            if (Number.isFinite(parsedZIndex)) {
-                effectiveZIndex = String(parsedZIndex);
-            }
-        }
+        const effectiveZIndex = String(sdk._getLauncherZIndex(null, setupConfig || {}));
 
         const styles = {
             position: 'fixed',
@@ -5853,18 +5939,67 @@
             console.error('[ModalFlow] Failed to save dismissal state:', e);
         }
     };
+    /**
+     * Determine the correct z-index for an attached launcher.
+     *
+     * Two modes:
+     * A) User has explicitly configured a z-index (setupConfig.zIndexIsDefault === false)
+     *    → return that value exactly, no scanning. Respect their intent.
+     *
+     * B) No user override (setupConfig.zIndexIsDefault === true, i.e. the "576" default)
+     *    → Scan every positioned element on the page and find the highest z-index.
+     *      Place the launcher at max + 1, so it is always above every existing element
+     *      without hardcoding a magic number that causes z-index wars.
+     *      Capped at 2147483647 (browser max).
+     *
+     * @param {Element|null} targetElement  The element the launcher is attached to.
+     * @param {object}       setupConfig    The launcher's setup config object.
+     * @returns {number}
+     */
+    sdk._getLauncherZIndex = function (targetElement, setupConfig) {
+        try {
+            if (setupConfig && setupConfig.zIndexIsDefault === false) {
+                const z = parseFloat(setupConfig.zIndex);
+                if (Number.isFinite(z)) return z;
+            }
+
+            var maxZ = 0;
+            try {
+                var all = document.querySelectorAll('*');
+                for (var i = 0; i < all.length; i++) {
+                    var el = all[i];
+                    if (el.id && el.id.indexOf('modal-flow-launcher') === 0) continue;
+                    if (el.id && el.id.indexOf('modalflow') === 0) continue;
+                    try {
+                        var cs = window.getComputedStyle(el);
+                        if (cs.position === 'static') continue;
+                        var z = parseInt(cs.zIndex, 10);
+                        if (!isNaN(z) && z > maxZ) maxZ = z;
+                    } catch (_) {}
+                }
+            } catch (_) {}
+            var result = maxZ > 0 ? maxZ + 1 : 100;
+
+            return Math.min(result, 2147483647);
+        } catch (e) {
+            return 100;
+        }
+    };
+
+    sdk._getElementEffectiveZIndex = function (element, defaultZIndex) {
+        return sdk._getLauncherZIndex(element, {});
+    };
+
     sdk._attachLauncherToElement = async function (appearance, behaviour, launcherId, refKey, flowRef = null) {
         if (!isOperationAllowed()) {
             return;
         }
         
-        // Check if dismissAfterFirstActivation exists in launcher object
         const tooltipOptions = behaviour?.tooltip?.options || {};
         const hasDismissAfterFirstActivation = tooltipOptions.hasOwnProperty('dismissAfterFirstActivation');
         const dismissAfterFirstActivationValue = tooltipOptions.dismissAfterFirstActivation;
         
         let isDismissed = false;
-        // Only check dismissal if dismissAfterFirstActivation property exists AND is true
         if (hasDismissAfterFirstActivation && dismissAfterFirstActivationValue === true) {
             isDismissed = sdk._isLauncherDismissed(launcherId);
         }
@@ -5928,15 +6063,8 @@
             launcher.dataset.flowRef = actualFlowRef;
 
             const setupConfig = sdk._launcherSetupConfigs?.[launcherId] || {};
-            let effectiveZIndex = '999999';
-            if (setupConfig.zIndex !== null && setupConfig.zIndex !== undefined) {
-                const parsedZIndex = typeof setupConfig.zIndex === 'string' 
-                    ? parseFloat(setupConfig.zIndex) 
-                    : Number(setupConfig.zIndex);
-                if (Number.isFinite(parsedZIndex)) {
-                    effectiveZIndex = String(parsedZIndex);
-                }
-            }
+            const detectedZ = sdk._getLauncherZIndex(targetElement, setupConfig);
+            let effectiveZIndex = String(detectedZ);
 
             launcher.style.position = 'fixed';
             launcher.style.zIndex = effectiveZIndex;
@@ -5993,7 +6121,6 @@
                 } catch (e) { return null; }
             };
 
-            // Setup positioning state
             let initialScrollX = null;
             let initialScrollY = null;
             let apiCoords = null;
@@ -6034,7 +6161,6 @@
                                 centerY: liveRect.top + (liveRect.height / 2)
                             };
                             
-                            // Check if position actually changed
                             if (lastRect && 
                                 lastRect.top === rect.top &&
                                 lastRect.left === rect.left &&
@@ -6121,7 +6247,6 @@
                             centerY: elementRect.top + (elementRect.height / 2)
                         };
                         
-                        // Check if position actually changed (similar to test.html)
                         if (lastRect && 
                             lastRect.top === rect.top &&
                             lastRect.left === rect.left &&
@@ -6206,6 +6331,16 @@
                     launcher.style.transform = `translate3d(${Math.round(translateX)}px, ${Math.round(translateY)}px, 0px)`;
                     launcher.style.left = '0';
                     launcher.style.top = '0';
+                    if (!setupConfig || setupConfig.zIndexIsDefault !== false) {
+                        try {
+                            const liveTarget = currentTargetRef.current || targetElement;
+                            const liveZ = sdk._getLauncherZIndex(liveTarget, setupConfig || {});
+                            const liveZStr = String(liveZ);
+                            if (launcher.style.zIndex !== liveZStr) {
+                                launcher.style.zIndex = liveZStr;
+                            }
+                        } catch (_) {}
+                    }
 
                     if (!hasInitializedPosition) {
                         hasInitializedPosition = true;
@@ -6626,12 +6761,10 @@
                         goManualValues.ifMultiple?.value === 'last' ? -1 : 0
                 };
                 
-                // Include text if both CSS selector and text are provided
                 if (goManualValues?.elementText?.value) {
                     selectorData.text = goManualValues.elementText.value;
                 }
             } else if (goManualValues?.elementText?.value) {
-                // Text-only selection (no CSS selector)
                 selector = null;
                 useAbsoluteCoordinates = false;
                 selectorData = {
@@ -6787,8 +6920,8 @@
                 width: '24px',
                 height: '24px',
                 borderRadius: '50%',
-                background: 'var(--ms-brand-background,var(--ms-theme-primary,#0d6efd))',
-                boxShadow: '0 0 0 0 var(--ms-brand-pulse-start,rgba(59,130,246,.65))',
+                background: 'var(--mf-brand-background,var(--mf-theme-primary,#0d6efd))',
+                boxShadow: '0 0 0 0 var(--mf-brand-pulse-start,rgba(59,130,246,.65))',
                 animation: 'mfPulse 1400ms ease-out infinite',
                 display: 'flex',
                 alignItems: 'center',
@@ -6799,7 +6932,7 @@
             });
 
             const innerDot = document.createElement('div');
-            innerDot.style.cssText = 'width:16px;height:16px;border-radius:50%;background:var(--ms-brand-background,var(--ms-theme-primary,#0d6efd));pointer-events:none;';
+            innerDot.style.cssText = 'width:16px;height:16px;border-radius:50%;background:var(--mf-brand-background,var(--mf-theme-primary,#0d6efd));pointer-events:none;';
             launcher.appendChild(innerDot);
         } else if (type === 'icon') {
             const iconClass = appearance?.iconClass || '';
@@ -6881,7 +7014,6 @@
                 });
             }
         }
-        // Hover effects
         launcher.addEventListener('mouseenter', () => {
             const currentTransform = launcher.style.transform || 'translate3d(0px, 0px, 0px)';
             if (!currentTransform.includes('scale')) {
@@ -6897,23 +7029,18 @@
     };
     sdk._handleLauncherAction = function (event, triggerType, behaviour, launcherId, refKey, flowRef = null) {
         try {
-            // Get launcher ID from element dataset or parameter
             const actualLauncherId = event.currentTarget?.dataset?.launcherId || launcherId;
-            // Get flow_ref from launcher element dataset, parameter, or lookup
             const actualFlowRef = flowRef || event.currentTarget?.dataset?.flowRef || sdk._launcherFlowRefs?.[actualLauncherId] || actualLauncherId;
 
             const config = behaviour || {};
-            // Check dismissAfterFirstActivation from tooltip options
             const tooltipOptions = config.tooltip?.options || {};
             const dismissAfterFirstActivation = tooltipOptions.dismissAfterFirstActivation || config.dismissAfterFirstActivation === true;
             const configTrigger = String(config.triggerEvent || 'clicked').toLowerCase();
-            // Handle both "click"/"clicked" and "hover"/"hovered" variations
             const isClickMatch = triggerType === 'click' && (configTrigger === 'clicked' || configTrigger === 'click');
             const isHoverMatch = triggerType === 'mouseover' && (configTrigger === 'hover' || configTrigger === 'hovered');
             const isTriggerEvent = isClickMatch || isHoverMatch;
 
             const behaviourType = String(config.type || '').toLowerCase();
-            // Show tooltip if type is show_tooltip OR if tooltip data exists (regardless of action type)
             if ((behaviourType === 'show_tooltip' || config.tooltip) && isTriggerEvent) {
                 if (triggerType === 'click') {
                     const ov = document.getElementById('modal-launcher-tooltip-overlay');
@@ -6932,14 +7059,12 @@
                 ? config.action
                 : (config.action ? [config.action] : []);
             if (!actions.length) {
-                // No actions defined, load flow from API and execute
                 const flowVersionId = config.flow_version_id || behaviour.flow_version_id || sdk._launcherFlowVersionIds?.[actualLauncherId] || null;
                 const environmentId = sdk._environmentId || window.__modalFlowEnvKey || null;
                 sdk._loadFlowFromApi(actualFlowRef, flowVersionId, environmentId).then((result) => {
                     if (result) {
                         sdk._executeFlow(actualFlowRef, refKey);
                         
-                        // Handle dismissAfterFirstActivation after flow starts
                         if (dismissAfterFirstActivation && actualLauncherId) {
                             sdk._markLauncherAsDismissed(actualLauncherId);
                             const { button: launcherButton, attached: launcherAttached } = sdk._getLauncherElementsByLauncherId(actualLauncherId);
@@ -6974,7 +7099,6 @@
                     const flowVersionId = action.flow_version_id || action.flowVersionId || config.flow_version_id || sdk._launcherFlowVersionIds?.[targetFlowId] || null;
                     const environmentId = sdk._environmentId || window.__modalFlowEnvKey || null;
 
-                    // Load flow from individual API endpoint: /flows/{flowid}.json?flow_version_id=...
                     sdk._loadFlowFromApi(targetFlowId, flowVersionId, environmentId).then((result) => {
                         if (result) {
                             if (targetStepId) {
@@ -6983,7 +7107,6 @@
                                 sdk._executeFlow(targetFlowId, refKey);
                             }
                             
-                            // Handle dismissAfterFirstActivation after flow starts
                             if (dismissAfterFirstActivation && actualLauncherId) {
                                 sdk._markLauncherAsDismissed(actualLauncherId);
                                 const { button: launcherButton, attached: launcherAttached } = sdk._getLauncherElementsByLauncherId(actualLauncherId);
@@ -7043,12 +7166,10 @@
         }
     };
     sdk._showTooltipModal = function (behaviour, event, triggerType, launcherId, refKey) {
-        // Check if modal already exists
         if (document.getElementById('modal-launcher-tooltip-overlay')) {
             return;
         }
 
-        // Parse behaviour if it's a string
         let parsedBehaviour = behaviour;
         if (typeof behaviour === 'string') {
             try {
@@ -7059,10 +7180,8 @@
             }
         }
 
-        // Get tooltip content from value or tooltip.content (new format)
         const tooltipText = parsedBehaviour.tooltip?.content || parsedBehaviour.value || 'Start here';
 
-        // Parse behaviour settings (new format only)
         const tooltipOptions = parsedBehaviour.tooltip?.options || {};
         const dismissAfterFirstActivation = tooltipOptions.dismissAfterFirstActivation === true;
         const isLauncherDismissed = (launcherId) => {
@@ -7074,7 +7193,6 @@
             }
         };
 
-        // Helper function to mark launcher as dismissed
         const markLauncherAsDismissed = (launcherId) => {
             try {
                 localStorage.setItem(`modalflow_launcher_dismissed_${launcherId}`, 'true');
@@ -7095,17 +7213,12 @@
         const keepOpenWhenHovered = tooltipOptions.keepOpenWhenHovered !== false;
         const hideLauncherWhileDisplayed = tooltipOptions.hideLauncherWhileDisplayed === true;
 
-        // Get positioning configuration (new format only)
         const specifyPosition = tooltipOptions.specifyPosition === true;
-        // Read position from tooltip.options.position (new format only)
         const positionValue = tooltipOptions.position || 'below';
-        // Normalize position values: "above" -> "above", "below" -> "below", etc.
         const tooltipPosition = String(positionValue).toLowerCase();
         
-        // Get tooltip width from ui.tooltip.width (new format)
         const tooltipWidth = parsedBehaviour.tooltip?.width || 400;
 
-        // Get launcher theme from setup config
         const launcherSetup = sdk._launcherSetupConfigs?.[launcherId] || {};
         const themeMode = launcherSetup.theme || 'light';
         if (launcherSetup.themeCSS) {
@@ -7113,35 +7226,32 @@
             if (!themeEl) {
                 themeEl = document.createElement('style');
                 themeEl.id = 'modalflow-theme-vars';
-                document.head.appendChild(themeEl);
+                (document.head || document.documentElement).appendChild(themeEl);
             }
             themeEl.textContent = launcherSetup.themeCSS;
         }
 
-        // Ensure brand colors are available for tooltip buttons (flow UI consistency)
         const brand = sdk._flowstyle?.base_colors?.brand || launcherSetup.brandColors;
         if (brand && !document.getElementById('modalflow-brand-vars')) {
             const parts = [];
-            if (brand.background) parts.push('--ms-brand-background:' + brand.background);
-            if (brand.backgroundHover) parts.push('--ms-brand-background-hover:' + brand.backgroundHover);
-            if (brand.backgroundClick) parts.push('--ms-brand-background-active:' + brand.backgroundClick);
-            if (brand.text) parts.push('--ms-brand-text:' + brand.text);
+            if (brand.background) parts.push('--mf-brand-background:' + brand.background);
+            if (brand.backgroundHover) parts.push('--mf-brand-background-hover:' + brand.backgroundHover);
+            if (brand.backgroundClick) parts.push('--mf-brand-background-active:' + brand.backgroundClick);
+            if (brand.text) parts.push('--mf-brand-text:' + brand.text);
             if (brand.background) {
-                parts.push('--ms-brand-pulse-start:' + hexToRgba(brand.background, 0.6));
-                parts.push('--ms-brand-pulse-end:' + hexToRgba(brand.background, 0));
-                parts.push('--ms-brand-background-subtle:' + hexToRgba(brand.background, 0.12));
+                parts.push('--mf-brand-pulse-start:' + hexToRgba(brand.background, 0.6));
+                parts.push('--mf-brand-pulse-end:' + hexToRgba(brand.background, 0));
+                parts.push('--mf-brand-background-subtle:' + hexToRgba(brand.background, 0.12));
             }
             if (parts.length) {
                 const st = document.createElement('style');
                 st.id = 'modalflow-brand-vars';
                 st.textContent = ':root{' + parts.join(';') + '}';
-                document.head.appendChild(st);
+                (document.head || document.documentElement).appendChild(st);
             }
         }
-        // Ensure single preview-styles block exists (flow + tooltip use same element; no duplicate style nodes)
         sdk._ensurePreviewStyles();
 
-        // Parse additional_block to get button configurations
         let additionalBlocks = [];
         try {
             if (parsedBehaviour.additional_block) {
@@ -7154,12 +7264,10 @@
             console.error('[ModalFlow] Failed to parse additional_block:', e);
         }
 
-        // Also check for tooltip.blocks (new format)
         if (parsedBehaviour.tooltip && parsedBehaviour.tooltip.blocks) {
             additionalBlocks = parsedBehaviour.tooltip.blocks;
         }
 
-        // Extract button blocks
         const buttonBlocks = additionalBlocks.filter(block => block.type === 'button');
         const effectiveKeepOpen = buttonBlocks.length > 0 ? true : keepOpenWhenHovered;
         const { button: launcherButton, attached: launcherAttached } = sdk._getLauncherElementsByLauncherId(launcherId);
@@ -7172,7 +7280,6 @@
             launcherElement.style.setProperty('visibility', 'hidden', 'important');
         }
 
-        // Create tooltip container (no overlay backdrop - tooltip style)
         const overlay = document.createElement('div');
         overlay.className = 'modal-launcher-tooltip-overlay';
         overlay.id = 'modal-launcher-tooltip-overlay';
@@ -7187,15 +7294,13 @@
             pointer-events: none;
         `;
 
-        // Create tooltip box (tooltip-style, not modal-style) with theme support
         const tooltip = document.createElement('div');
         tooltip.className = `modal-launcher-tooltip-box ${themeMode}`;
-        // Only set min-width if tooltipWidth is less than 200, otherwise use tooltipWidth as min
         const minWidth = tooltipWidth < 200 ? 200 : tooltipWidth;
         tooltip.style.cssText = `
             position: fixed;
-            background: var(--ms-theme-background-secondary, ${themeMode === 'dark' ? '#1f2937' : '#ffffff'});
-            color: var(--ms-theme-text-primary, ${themeMode === 'dark' ? '#fff' : '#212529'});
+            background: var(--mf-theme-background-secondary, ${themeMode === 'dark' ? '#1f2937' : '#ffffff'});
+            color: var(--mf-theme-text-primary, ${themeMode === 'dark' ? '#fff' : '#212529'});
             padding: 12px 16px;
             border-radius: 8px;
             z-index: 1000001;
@@ -7203,28 +7308,25 @@
             width: ${tooltipWidth}px;
             max-width: ${tooltipWidth}px;
             min-width: ${minWidth}px;
-            box-shadow: 0 4px 12px var(--ms-theme-shadow, rgba(0,0,0,0.25));
+            box-shadow: 0 4px 12px var(--mf-theme-shadow, rgba(0,0,0,0.25));
             pointer-events: auto;
             font-family: system-ui, -apple-system, sans-serif;
             line-height: 1.5;
-            border: 1px solid var(--ms-theme-border, ${themeMode === 'dark' ? '#666666' : '#eaecf0'});
+            border: 1px solid var(--mf-theme-border, ${themeMode === 'dark' ? '#666666' : '#eaecf0'});
         `;
 
         let isOverTooltip = false;
         let isOverLauncher = false;
 
-        // Create content
         const content = document.createElement('div');
         content.className = 'modal-launcher-tooltip-content';
         content.innerHTML = tooltipText;
-        content.style.cssText = `margin: 0; color: var(--ms-theme-text-primary, ${themeMode === 'dark' ? '#fff' : '#212529'});`;
+        content.style.cssText = `margin: 0; color: var(--mf-theme-text-primary, ${themeMode === 'dark' ? '#fff' : '#212529'});`;
 
-        // Create footer with buttons from additional_block
         const footer = document.createElement('div');
         footer.className = 'modal-launcher-tooltip-footer';
         footer.style.cssText = 'display: flex; gap: 8px; margin-top: 12px; justify-content: flex-end;';
 
-        // Helper function to execute button actions
         const executeButtonActions = (actions) => {
             if (!Array.isArray(actions) || actions.length === 0) {
                 return;
@@ -7249,7 +7351,6 @@
                         console.error('[ModalFlow] No flow ID found in action:', action);
                     }
 
-                    // Handle dismissAfterFirstActivation
                     if (dismissAfterFirstActivation) {
                         markLauncherAsDismissed(launcherId);
                         if (launcherElement) {
@@ -7278,15 +7379,12 @@
             }
         };
 
-        // Create buttons from additional_block
         if (buttonBlocks.length > 0) {
             buttonBlocks.forEach((buttonBlock, index) => {
-                // New format: direct properties
                 let btnText = buttonBlock.text || 'Button';
                 let btnStyle = buttonBlock.style || 'primary';
                 let btnActions = [];
                     
-                // Convert new format action to old format for executeButtonActions
                 if (buttonBlock.action) {
                     const action = buttonBlock.action;
                     if (action.type === 'start_flow') {
@@ -7297,7 +7395,6 @@
                             condition_type: 'startflow'
                         }];
                     } else {
-                        // Handle other action types
                         btnActions = [{
                             type: action.type === 'start_flow' ? 'startFlow' : action.type,
                             flowRef: action.flow_ref,
@@ -7325,24 +7422,20 @@
             });
         }
 
-        // Assemble tooltip
         tooltip.appendChild(content);
         if (buttonBlocks.length > 0 || footer.children.length > 0) {
             tooltip.appendChild(footer);
         }
         overlay.appendChild(tooltip);
 
-        // Add to document
         document.body.appendChild(overlay);
 
-        // Position tooltip relative to launcher (always positioned relative to launcher)
         if (launcherElement) {
             const launcherRect = launcherElement.getBoundingClientRect();
             const tooltipRect = tooltip.getBoundingClientRect();
             const gap = 12; // Gap between launcher and tooltip
             const arrowSize = 8; // Size of the arrow pointer
 
-            // Create arrow element
             const arrow = document.createElement('div');
             arrow.style.cssText = `
                 position: absolute;
@@ -7353,7 +7446,6 @@
             tooltip.appendChild(arrow);
 
             let top, left;
-            // Use specified position if specifyPosition is true, otherwise default to 'below'
             const effectivePosition = specifyPosition ? tooltipPosition : 'below';
 
             switch (effectivePosition.toLowerCase()) {
@@ -7362,10 +7454,9 @@
                     top = launcherRect.bottom + gap;
                     left = launcherRect.left + (launcherRect.width / 2) - (tooltipRect.width / 2);
 
-                    // Arrow pointing up - use CSS variable for background color
                     const arrowColor = themeMode === 'dark' 
-                        ? 'var(--ms-theme-background-secondary, #1f2937)' 
-                        : 'var(--ms-theme-background-secondary, #ffffff)';
+                        ? 'var(--mf-theme-background-secondary, #1f2937)' 
+                        : 'var(--mf-theme-background-secondary, #ffffff)';
                     arrow.style.cssText += `
                         border-width: 0 ${arrowSize}px ${arrowSize}px ${arrowSize}px;
                         border-color: transparent transparent ${arrowColor} transparent;
@@ -7380,10 +7471,9 @@
                     top = launcherRect.top - tooltipRect.height - gap;
                     left = launcherRect.left + (launcherRect.width / 2) - (tooltipRect.width / 2);
 
-                    // Arrow pointing down - use CSS variable for background color
                     const arrowColorTop = themeMode === 'dark' 
-                        ? 'var(--ms-theme-background-secondary, #1f2937)' 
-                        : 'var(--ms-theme-background-secondary, #ffffff)';
+                        ? 'var(--mf-theme-background-secondary, #1f2937)' 
+                        : 'var(--mf-theme-background-secondary, #ffffff)';
                     arrow.style.cssText += `
                         border-width: ${arrowSize}px ${arrowSize}px 0 ${arrowSize}px;
                         border-color: ${arrowColorTop} transparent transparent transparent;
@@ -7397,10 +7487,9 @@
                     top = launcherRect.top + (launcherRect.height / 2) - (tooltipRect.height / 2);
                     left = launcherRect.left - tooltipRect.width - gap;
 
-                    // Arrow pointing right - use CSS variable for background color
                     const arrowColorLeft = themeMode === 'dark' 
-                        ? 'var(--ms-theme-background-secondary, #1f2937)' 
-                        : 'var(--ms-theme-background-secondary, #ffffff)';
+                        ? 'var(--mf-theme-background-secondary, #1f2937)' 
+                        : 'var(--mf-theme-background-secondary, #ffffff)';
                     arrow.style.cssText += `
                         border-width: ${arrowSize}px 0 ${arrowSize}px ${arrowSize}px;
                         border-color: transparent transparent transparent ${arrowColorLeft};
@@ -7414,10 +7503,9 @@
                     top = launcherRect.top + (launcherRect.height / 2) - (tooltipRect.height / 2);
                     left = launcherRect.right + gap;
 
-                    // Arrow pointing left - use CSS variable for background color
                     const arrowColorRight = themeMode === 'dark' 
-                        ? 'var(--ms-theme-background-secondary, #1f2937)' 
-                        : 'var(--ms-theme-background-secondary, #ffffff)';
+                        ? 'var(--mf-theme-background-secondary, #1f2937)' 
+                        : 'var(--mf-theme-background-secondary, #ffffff)';
                     arrow.style.cssText += `
                         border-width: ${arrowSize}px ${arrowSize}px ${arrowSize}px 0;
                         border-color: transparent ${arrowColorRight} transparent transparent;
@@ -7428,13 +7516,12 @@
                     break;
 
                 default:
-                    // Default to below if position is not recognized
                     top = launcherRect.bottom + gap;
                     left = launcherRect.left + (launcherRect.width / 2) - (tooltipRect.width / 2);
 
                     const arrowColorDefault = themeMode === 'dark' 
-                        ? 'var(--ms-theme-background-secondary, #1f2937)' 
-                        : 'var(--ms-theme-background-secondary, #ffffff)';
+                        ? 'var(--mf-theme-background-secondary, #1f2937)' 
+                        : 'var(--mf-theme-background-secondary, #ffffff)';
                     arrow.style.cssText += `
                         border-width: 0 ${arrowSize}px ${arrowSize}px ${arrowSize}px;
                         border-color: transparent transparent ${arrowColorDefault} transparent;
@@ -7461,10 +7548,8 @@
             tooltip.style.top = `${top}px`;
             tooltip.style.left = `${left}px`;
 
-            // Adjust arrow position to align with launcher center after viewport constraints
             const adjustArrowPosition = () => {
                 try {
-                    // Get fresh bounding rects after viewport adjustment
                     const freshLauncherRect = launcherElement.getBoundingClientRect();
                     const freshTooltipRect = tooltip.getBoundingClientRect();
                     
@@ -7508,7 +7593,6 @@
             requestAnimationFrame(() => {
                 overlay.remove();
                 if (hideLauncherWhileDisplayed && launcherElement) {
-                    // Batch style property removals
                     requestAnimationFrame(() => {
                         delete launcherElement.dataset.tooltipDisplayed;
                         launcherElement.style.removeProperty('opacity');
@@ -7528,7 +7612,6 @@
             });
         }
 
-        // Check if launcher is visible and can receive mouse events
         const isLauncherVisible = launcherElement && !hideLauncherWhileDisplayed;
 
         if (effectiveKeepOpen) {
@@ -7610,7 +7693,6 @@
             }
         }
 
-        // Close on Escape key (optional for tooltip)
         const handleEscape = (e) => {
             if (e.key === 'Escape') {
                 overlay.remove();
@@ -7625,7 +7707,6 @@
         };
         document.addEventListener('keydown', handleEscape);
 
-        // Cleanup when overlay is removed
         const originalRemove = overlay.remove.bind(overlay);
         overlay.remove = function () {
             if (overlay._cleanupLauncherListeners) {
@@ -7646,7 +7727,6 @@
             parts.protocolRelative = true;
             remaining = p.substring(2); // Remove //
         }
-        // Extract scheme
         else {
             const schemeMatch = p.match(/^([^:]+):\/\//);
             if (schemeMatch) {
@@ -7655,7 +7735,6 @@
             }
         }
         
-        // Extract query and hash
         const qIdx = remaining.indexOf('?');
         const hIdx = remaining.indexOf('#');
         let beforeQueryHash = remaining;
@@ -7671,7 +7750,6 @@
             parts.hash = remaining.substring(hIdx + 1);
         }
         
-        // Extract domain and path
         if (beforeQueryHash.startsWith('/')) {
             parts.path = beforeQueryHash;
         } else if (beforeQueryHash) {
@@ -7700,7 +7778,6 @@
             const patternParts = sdk._parsePatternParts(pattern);
             
             if (patternParts.protocolRelative) {
-                // Skip scheme matching for protocol-relative URLs
             } else if (patternParts.scheme && patternParts.scheme.toLowerCase() !== urlObj.protocol.replace(':', '').toLowerCase()) {
                 return false;
             }
@@ -7741,35 +7818,28 @@
         const cleanPath = path.replace(/\/$/, '');
         if (cleanPattern === cleanPath) return true;
         
-        // Handle /* pattern - matches / and any subpath
         if (pattern === '/*' || pattern === '*') {
             return path === '/' || path.startsWith('/');
         }
         
-        // Handle /app* vs /app/* difference
         if (pattern.endsWith('*') && !pattern.endsWith('/*')) {
             const base = pattern.slice(0, -1);
             if (cleanPath === base || cleanPath.startsWith(base + '/') || cleanPath.startsWith(base)) return true;
         } else if (pattern.endsWith('/*')) {
             const base = pattern.slice(0, -2);
-            // Special case: if base is empty, /* should match / and any subpath
             if (base === '') {
                 return path === '/' || path.startsWith('/');
             }
             if (cleanPath.startsWith(base + '/')) return true;
         }
         
-        // Handle :param and * patterns with regex
         try {
-            // First replace :param and * patterns with placeholders
             let regexPattern = pattern
                 .replace(/:[a-zA-Z0-9_]+/g, '__PARAM__') // :param -> placeholder
                 .replace(/\*/g, '__WILDCARD__'); // * -> placeholder
             
-            // Escape special regex chars (forward slashes don't need escaping in RegExp)
             regexPattern = regexPattern.replace(/[.+?${}()|\\\[\]]/g, '\\$&');
             
-            // Restore placeholders with actual regex patterns
             regexPattern = regexPattern.replace(/__PARAM__/g, '[^/]+');
             regexPattern = regexPattern.replace(/__WILDCARD__/g, '.*');
             
@@ -7841,7 +7911,6 @@
     sdk._end = function () {
         if (sdk._flows) {
             Object.keys(sdk._flows).forEach(key => {
-                // Skip the refKey entries (which are strings)
                 if (sdk._flows[key] && typeof sdk._flows[key] === 'object' && sdk._flows[key].launcher) {
                     setTimeout(() => {
                         sdk._updateLauncherVisibilityForFlow(key);
@@ -7851,13 +7920,11 @@
         }
     };
     sdk._isFlowActive = function () {
-        // Check if the flow overlay exists
         const overlay = document.getElementById('modalflow-guide-overlay');
         if (overlay) {
             return true;
         }
 
-        // Check if any modalflow boxes exist
         const boxes = document.querySelectorAll('[data-modalflow-box="1"]');
         if (boxes && boxes.length > 0) {
             return true;
@@ -7882,7 +7949,6 @@
         return (sdk._dismissedAutoStartFlowIds || []).includes(flowId);
     };
 
-    // Track last valid URL for each flow to detect navigation away/back
     sdk._getLastValidUrlForFlow = function (flowId) {
         try {
             const lastUrls = sessionStorage.getItem('modalflow_last_valid_urls');
@@ -7944,14 +8010,12 @@
         });
     };
 
-    // Helper function to set launcher display only if it needs to change
     sdk._setLauncherDisplay = function (element, targetDisplay) {
         if (!element) return;
         
         const currentDisplay = element.style.display || window.getComputedStyle(element).display;
         const normalizedCurrent = currentDisplay === 'none' ? 'none' : (targetDisplay === 'inline-flex' ? 'inline-flex' : 'inline-block');
         
-        // Only update if the display value actually needs to change
         if (normalizedCurrent !== targetDisplay) {
             element.style.display = targetDisplay;
         }
@@ -7960,11 +8024,9 @@
     sdk._updateLauncherVisibilityForFlow = function (flowId) {
         if (!flowId) return;
         
-        // Find launcher setup from new structure
         let setupConfig = {};
         let foundSetup = false;
         
-        // Check launcherSetupConfigs by flowRef
         let foundLauncherId = null;
         if (sdk._launcherSetupConfigs) {
             for (const [launcherId, config] of Object.entries(sdk._launcherSetupConfigs)) {
@@ -7980,10 +8042,8 @@
         
         if (!foundSetup) return;
 
-        // Check if launcher is dismissed (permanently hidden after first activation)
         if (foundLauncherId && sdk._isLauncherDismissed(foundLauncherId)) {
             const { button: buttonLauncher, attached: attachedLauncher } = sdk._getLauncherElementsByFlow(flowId);
-            // Permanently hide dismissed launchers
             if (buttonLauncher) {
                 buttonLauncher.style.display = 'none';
                 buttonLauncher.remove();
@@ -8000,19 +8060,15 @@
 
         const { button: buttonLauncher, attached: attachedLauncher } = sdk._getLauncherElementsByFlow(flowId);
 
-        // Determine if launcher should be visible
         let shouldShow = false;
         if (isFlowActive) {
-            // When flow is active, show launcher only if showLauncherWhileFlowsActive is true
             shouldShow = showWhileActive;
         } else {
-            // When flow is not active, check URL/conditions
             const urlMatches = sdk._checkLauncherUrlMatching(setupConfig);
             const conditionsPass = sdk._checkOnlyShowLauncherConditions(setupConfig);
             shouldShow = urlMatches && conditionsPass;
         }
 
-        // Apply visibility only if it needs to change
         if (shouldShow) {
             sdk._setLauncherDisplay(buttonLauncher, 'inline-block');
             sdk._setLauncherDisplay(attachedLauncher, 'inline-flex');
@@ -8047,7 +8103,6 @@
                 });
             } catch (e) {}
             
-            // Beacons and tooltips
             try {
                 const beacons = document.querySelectorAll('.mf-beacon');
                 beacons.forEach(b => {
@@ -8093,7 +8148,6 @@
         }
     };
     
-    // Remove stray step (no overlay parent) when no flow is active (Vue keep-alive can restore step only)
     sdk._removeStrayModalFlowDOM = function () {
         try {
             if (sessionStorage.getItem('modalflow_active_flow_id')) return;
@@ -8107,7 +8161,6 @@
         } catch (err) {}
     };
     
-    // Helper function to find refKey from sdk._flows
     sdk._findRefKey = function (flowId) {
         try {
             if (!sdk._flows) return flowId;
@@ -8120,10 +8173,8 @@
         return flowId;
     };
     
-    // Helper function to parse launcher config JSON strings
     sdk._parseLauncherConfig = function (launcher) {
         try {
-            // Handle both JSON strings and objects
             const parseField = (field) => {
                 if (!field) return {};
                 if (typeof field === 'string') {
@@ -8159,7 +8210,6 @@
     
     sdk._loadLauncherConfig = function (launcherIdOrFlowRef) {
         try {
-            // Check if it's a launcherId
             const launcherData = sdk._launchers?.[launcherIdOrFlowRef];
             if (launcherData) {
                 const convertedLauncher = sdk._convertLauncherToOldFormat(launcherData, null);
@@ -8168,10 +8218,8 @@
                 }
             }
             
-            // Try to find launcher by flowRef
             const launcherIds = sdk._launcherIdsByFlowRef?.[launcherIdOrFlowRef];
             if (launcherIds && launcherIds.length > 0) {
-                // Use first matching launcher
                 const launcherDataByFlowRef = sdk._launchers?.[launcherIds[0]];
                 if (launcherDataByFlowRef) {
                     const convertedLauncher = sdk._convertLauncherToOldFormat(launcherDataByFlowRef, null);
@@ -8184,14 +8232,12 @@
         return null;
     };
     
-    // Helper function to check URL conditions for a flow
     sdk._checkUrlConditionsForActiveFlow = function (flowId) {
         try {
             const currentUrl = window.location.href;
             let shouldKeepFlowActive = false;
             let hasUrlConditions = false;
         
-        // Check if flow has launcher with URL conditions
         const launcherConfig = sdk._loadLauncherConfig(flowId);
         if (launcherConfig) {
             const urlMatches = sdk._checkLauncherUrlConditions(launcherConfig.setup);
@@ -8203,7 +8249,6 @@
             }
         }
         
-        // Check sdk._autoStartSettings for autostart URL conditions
         if (!hasUrlConditions && sdk._autoStartSettings?.[flowId]) {
             const autoStartSettings = sdk._autoStartSettings[flowId];
             if (autoStartSettings && autoStartSettings.value === true) {
@@ -8220,7 +8265,6 @@
             }
         }
         
-        // Check flows_meta for autostart URL conditions
         if (!hasUrlConditions && sdk._flowsMeta?.[flowId]) {
             const flowMeta = sdk._flowsMeta[flowId];
             const autoStart = flowMeta.settings?.behavior?.autoStart;
@@ -8266,7 +8310,6 @@
         
         return { hasUrlConditions, shouldKeepFlowActive };
         } catch (e) {
-            // Return safe defaults if any error occurs
             return { hasUrlConditions: false, shouldKeepFlowActive: false };
         }
     };
@@ -8286,7 +8329,6 @@
                 }
             };
 
-            // Listen to History API changes (pushState, replaceState)
             try {
                 const originalPushState = history.pushState;
                 const originalReplaceState = history.replaceState;
@@ -8308,17 +8350,14 @@
                 // Silently fail if History API is not available
             }
 
-            // Listen to popstate (back/forward buttons)
             try {
                 window.addEventListener('popstate', checkUrlChange);
             } catch (e) {}
 
-            // Listen to hashchange
             try {
                 window.addEventListener('hashchange', checkUrlChange);
             } catch (e) {}
             
-            // Remove stray step (no overlay) when Vue keep-alive restores cached DOM
             try {
                 var strayScheduled = false;
                 var strayObs = new MutationObserver(function () {
@@ -8336,12 +8375,10 @@
 
     sdk._handleUrlChange = async function () {
         try {
-            // Check if a flow is currently active and if it still matches URL conditions
             const hasActiveFlow = sdk._isFlowActive();
             let flowWasDismissed = false;
             
             if (hasActiveFlow) {
-                // Try to get the active flowId from sessionStorage or overlay data attribute
                 let activeFlowId = null;
                 try {
                     const overlay = document.getElementById('modalflow-guide-overlay');
@@ -8352,10 +8389,8 @@
                     }
                     
                     if (activeFlowId) {
-                        // Check URL conditions for this flow
                         const { hasUrlConditions, shouldKeepFlowActive } = sdk._checkUrlConditionsForActiveFlow(activeFlowId);
                         
-                        // If flow has URL conditions and doesn't match, dismiss it
                         if (hasUrlConditions && !shouldKeepFlowActive) {
                             sdk._dismissActiveFlow();
                             flowWasDismissed = true;
@@ -8366,39 +8401,31 @@
                 }
             }
             
-            // If flow was dismissed, wait a bit to ensure cleanup is reflected before checking auto-start
             if (flowWasDismissed) {
                 try {
-                    // Use requestAnimationFrame to ensure DOM updates are complete
                     await new Promise(resolve => requestAnimationFrame(resolve));
                 } catch (e) {
                     // Silently fail
                 }
             }
             
-            // Track processed launcher elements to avoid unnecessary DOM operations
             const processedLauncherElements = new Set();
 
-            // Process launchers from sdk._launchers
             const launcherIds = new Set();
             
-            // Collect launcher IDs from sdk._launchers
             if (sdk._launchers) {
                 for (const launcherId in sdk._launchers) {
                     launcherIds.add(launcherId);
                 }
             }
             
-            // Process each launcher sequentially to prevent race conditions
             for (const launcherId of launcherIds) {
                 try {
-                    // Get launcher data
                     const launcherData = sdk._launchers?.[launcherId];
                     if (!launcherData) {
                         continue;
                     }
                     
-                    // Load launcher config
                     const launcherConfig = sdk._loadLauncherConfig(launcherId);
                     if (!launcherConfig) {
                         continue;
@@ -8418,31 +8445,34 @@
                     const shouldShowLauncher = urlMatches && conditionsPass;
                     const { button: buttonLauncher, attached: attachedLauncher } = sdk._getLauncherElementsByLauncherId(launcherId);
 
-                    // Track processed elements
                     if (buttonLauncher) processedLauncherElements.add(buttonLauncher);
                     if (attachedLauncher) processedLauncherElements.add(attachedLauncher);
 
                     if (shouldShowLauncher) {
                         if (buttonLauncher) {
                             sdk._setLauncherDisplay(buttonLauncher, 'inline-block');
-                            // zIndex update only if needed
-                            if (setupConfig.zIndex != null && Number.isFinite(parseFloat(setupConfig.zIndex))) {
-                                const currentZIndex = buttonLauncher.style.zIndex;
-                                const targetZIndex = String(setupConfig.zIndex);
-                                if (currentZIndex !== targetZIndex) {
-                                    buttonLauncher.style.zIndex = targetZIndex;
+                            try {
+                                const newZ = String(sdk._getLauncherZIndex(null, setupConfig));
+                                if (buttonLauncher.style.zIndex !== newZ) {
+                                    buttonLauncher.style.zIndex = newZ;
                                 }
-                            }
+                            } catch (_) {}
                         } else if (attachedLauncher) {
                             sdk._setLauncherDisplay(attachedLauncher, 'inline-flex');
-                            // zIndex update only if needed
-                            if (setupConfig.zIndex != null && Number.isFinite(parseFloat(setupConfig.zIndex))) {
-                                const currentZIndex = attachedLauncher.style.zIndex;
-                                const targetZIndex = String(setupConfig.zIndex);
-                                if (currentZIndex !== targetZIndex) {
-                                    attachedLauncher.style.zIndex = targetZIndex;
+                            try {
+                                const elementConfig = appearanceConfig.launcher_element;
+                                let liveEl = null;
+                                if (elementConfig && setupConfig.zIndexIsDefault !== false) {
+                                    const posData = sdk._getElementSelectorWithMode(elementConfig);
+                                    if (posData && posData.selectorData && posData.selectorData.selector) {
+                                        liveEl = document.querySelector(posData.selectorData.selector);
+                                    }
                                 }
-                            }
+                                const newZ = String(sdk._getLauncherZIndex(liveEl, setupConfig));
+                                if (attachedLauncher.style.zIndex !== newZ) {
+                                    attachedLauncher.style.zIndex = newZ;
+                                }
+                            } catch (_) {}
                             sdk._refreshAttachedLauncherPosition(attachedLauncher);
                         } else {
                             const elementConfig = appearanceConfig.launcher_element;
@@ -8520,7 +8550,6 @@
                 }, delay);
             });
             
-            // Process auto-start flows from sdk._flows
             if (sdk._flows && sdk._autoStartSettings) {
                 for (const flowId in sdk._flows) {
                     const flowData = sdk._flows[flowId];
@@ -8610,7 +8639,8 @@
                         
                         if (shouldBeActive) {
                             const wasDismissed = sdk._isAutoStartFlowDismissed(flowRef);
-
+                            const lastValidUrl = sdk._getLastValidUrlForFlow(flowRef);
+                            const navigatedAwayAndBack = lastValidUrl && lastValidUrl !== currentUrl;
 
                             let shouldShow = false;
                             if (frequency === 'once_per_user') {
@@ -8638,6 +8668,7 @@
                             sdk._setLastValidUrlForFlow(flowRef, null);
                         }
                     } catch (err) {
+                        // Silently fail to prevent breaking main site
                     }
                 }
             }
@@ -8669,11 +8700,11 @@
         }
     };
 
-    sdk.init = function (...args) { return sdk._init.apply(sdk, args); };
-    sdk.identify = function (...args) { return sdk._identify.apply(sdk, args); };
-    sdk.start = function (...args) { return sdk._start.apply(sdk, args); };
-    sdk.initModalFlow = function (...args) { return sdk._initModalFlow.apply(sdk, args); };
-    sdk.end = function (...args) { return sdk._end.apply(sdk, args); };
+    sdk.init = function (...args) { try { return sdk._init.apply(sdk, args); } catch(e) {} };
+    sdk.identify = function (...args) { try { return sdk._identify.apply(sdk, args); } catch(e) {} };
+    sdk.start = function (...args) { try { return sdk._start.apply(sdk, args); } catch(e) {} };
+    sdk.initModalFlow = function (...args) { try { return sdk._initModalFlow.apply(sdk, args); } catch(e) {} };
+    sdk.end = function (...args) { try { return sdk._end.apply(sdk, args); } catch(e) {} };
 
     sdk._onReady = function () {
         try {
@@ -8684,16 +8715,18 @@
                 (document.head || document.documentElement).appendChild(st);
             }
         } catch (e) {}
-        sdk._flushQueue();
-        sdk._autoInit();
-        sdk._setupUrlChangeMonitoring();
+        try { sdk._flushQueue(); } catch (e) {}
+        try { sdk._autoInit(); } catch (e) {}
+        try { sdk._setupUrlChangeMonitoring(); } catch (e) {}
     };
 
-    window.modal = sdk;
+    try { window.modal = sdk; } catch (e) {}
 
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', sdk._onReady);
-    } else {
-        setTimeout(sdk._onReady, 0);
-    }
+    try {
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', sdk._onReady);
+        } else {
+            setTimeout(sdk._onReady, 0);
+        }
+    } catch (e) {}
 })();
