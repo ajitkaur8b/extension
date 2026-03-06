@@ -3,7 +3,95 @@
         return;
     }
     window.__MODAL_RUNTIME_LOADED__ = true;
+
+
+    (function setupShadowHost() {
+        try {
+            if (window.__mfShadowRoot) return; // already set up
+
+            var host = document.createElement('div');
+            host.id = 'mf-shadow-host';
+
+            host.style.cssText = 'position:static;width:0;height:0;overflow:visible;border:none;padding:0;margin:0;background:transparent;pointer-events:auto;';
+
+            (document.body || document.documentElement).appendChild(host);
+
+            var shadow = host.attachShadow({ mode: 'open' });
+            window.__mfShadowRoot = shadow;
+
+            var shadowBody = document.createElement('div');
+            shadowBody.id = 'mf-shadow-body';
+            shadowBody.style.cssText = 'position:static;width:0;height:0;overflow:visible;pointer-events:auto;';
+            shadow.appendChild(shadowBody);
+            window.__mfShadowBody = shadowBody;
+        } catch (e) {
+
+            window.__mfShadowRoot = null;
+            window.__mfShadowBody = document.body;
+        }
+    })();
+
+
+    function __mfAppendUI(el) {
+        try {
+            if (window.__mfShadowBody) {
+                window.__mfShadowBody.appendChild(el);
+            } else {
+                document.body.appendChild(el);
+            }
+        } catch (e) {
+            try { document.body.appendChild(el); } catch (_) {}
+        }
+    }
+
+
+    function __mfInjectStyle(styleEl) {
+        try {
+            if (window.__mfShadowRoot) {
+                window.__mfShadowRoot.appendChild(styleEl);
+            } else {
+                (document.head || document.documentElement).appendChild(styleEl);
+            }
+        } catch (e) {
+            try { (document.head || document.documentElement).appendChild(styleEl); } catch (_) {}
+        }
+    }
+
+
+    function __mfGetById(id) {
+        try {
+            if (window.__mfShadowRoot) {
+                var el = window.__mfShadowRoot.getElementById
+                    ? window.__mfShadowRoot.getElementById(id)
+                    : window.__mfShadowRoot.querySelector('#' + id);
+                if (el) return el;
+            }
+        } catch (_) {}
+        return document.getElementById(id);
+    }
+
+
+    function __mfQueryAll(sel) {
+        var results = [];
+        try {
+            if (window.__mfShadowRoot) {
+                results = results.concat(Array.from(window.__mfShadowRoot.querySelectorAll(sel)));
+            }
+        } catch (_) {}
+        try {
+            results = results.concat(Array.from(document.querySelectorAll(sel)));
+        } catch (_) {}
+
+        return results.filter(function(el, i, arr) { return arr.indexOf(el) === i; });
+    }
+
     
+    window.__mfAppendUI = __mfAppendUI;
+    window.__mfInjectStyle = __mfInjectStyle;
+    window.__mfGetById = __mfGetById;
+    window.__mfQueryAll = __mfQueryAll;
+
+
     const API_BASE = "https://mfb.modalsupport.com";
 
     function _safeStorageGet(storage, key) {
@@ -185,6 +273,35 @@
             };
         }
 
+        // Lightweight session cache to avoid refetching flow steps on navigation.
+        // Keeps "cold start" from launcher fast without relying on HTTP cache.
+        try {
+            const cacheKey = 'modalflow_flowcache:' + String(flowId) + ':' + String(flowVersionId || '') + ':' + String(environmentId || '');
+            const cachedRaw = sessionStorage.getItem(cacheKey);
+            if (cachedRaw) {
+                const cached = JSON.parse(cachedRaw);
+                const ts = Number(cached && cached.ts);
+                const ttlMs = Number(cached && cached.ttlMs) || (5 * 60 * 1000); // 5 minutes default
+                const fresh = Number.isFinite(ts) && (Date.now() - ts) < ttlMs;
+                if (fresh && cached && Array.isArray(cached.flowSteps)) {
+                    sdk._autoStartSettings = sdk._autoStartSettings || {};
+                    sdk._flowObjects = sdk._flowObjects || {};
+                    sdk._flowsetup = sdk._flowsetup || {};
+                    sdk._flows = sdk._flows || {};
+                    sdk._flowObjects[flowId] = cached.flowSteps;
+                    sdk._flowsetup[flowId] = cached.setupConfig || {};
+                    sdk._autoStartSettings[flowId] = (cached.setupConfig && (cached.setupConfig.auto_start || cached.setupConfig.autoStart)) || cached.autoStartSettings || {};
+                    sdk._flows[flowId] = cached.flowResponse || sdk._flows[flowId];
+                    return {
+                        flowObjects: sdk._flowObjects[flowId],
+                        flowsetup: sdk._flowsetup[flowId],
+                        autoStartSettings: sdk._autoStartSettings[flowId],
+                        setupConfig: sdk._flowsetup[flowId] || {}
+                    };
+                }
+            }
+        } catch (_) { }
+
         try {
             const flowApiUrl = new URL('https://mfb.modalsupport.com/getflowdata');
             
@@ -249,6 +366,20 @@
 
             sdk._flows = sdk._flows || {};
             sdk._flows[flowId] = flowResponse;
+
+            // Cache to sessionStorage (best-effort).
+            try {
+                const cacheKey = 'modalflow_flowcache:' + String(flowId) + ':' + String(flowVersionId || '') + ':' + String(environmentId || '');
+                const payload = {
+                    ts: Date.now(),
+                    ttlMs: 5 * 60 * 1000,
+                    flowSteps: flowSteps,
+                    setupConfig: setupConfig,
+                    autoStartSettings: sdk._autoStartSettings[flowId],
+                    flowResponse: flowResponse
+                };
+                sessionStorage.setItem(cacheKey, JSON.stringify(payload));
+            } catch (_) { }
 
             return {
                 flowObjects: sdk._flowObjects[flowId],
@@ -318,7 +449,7 @@
             } catch (_) {
                 sdk._flowstyle = {};
             }
-            if (sdk._flowstyle?.base_colors?.brand && !document.getElementById('modalflow-brand-vars')) {
+            if (sdk._flowstyle?.base_colors?.brand && !(window.__mfGetById || document.getElementById.bind(document))('modalflow-brand-vars')) {
                 const b = sdk._flowstyle.base_colors.brand;
                 const parts = [];
                 if (b.background) parts.push('--mf-brand-background:' + b.background);
@@ -333,8 +464,8 @@
                 if (parts.length) {
                     const st = document.createElement('style');
                     st.id = 'modalflow-brand-vars';
-                    st.textContent = ':root{' + parts.join(';') + '}';
-                    (document.head || document.documentElement).appendChild(st);
+                    st.textContent = ':root,:host{' + parts.join(';') + '}';
+                    __mfInjectStyle(st);
                 }
             }
             
@@ -528,6 +659,17 @@
             let confettiInlineB64 = '';
             function stringToBase64(str) {
                 try {
+                    // Faster + less memory churn than unescape/encodeURIComponent (notably in Firefox).
+                    if (typeof TextEncoder !== 'undefined') {
+                        const bytes = new TextEncoder().encode(String(str));
+                        const chunkSize = 0x8000;
+                        let binary = '';
+                        for (let i = 0; i < bytes.length; i += chunkSize) {
+                            binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+                        }
+                        return btoa(binary);
+                    }
+                    // Fallback for older browsers.
                     return btoa(unescape(encodeURIComponent(str)));
                 } catch (e) {
                     return '';
@@ -550,7 +692,11 @@
 
             if (hasConfettiStep) {
                 try {
-                    const s3Url = 'https://hlptflowbuilder.s3.us-east-1.amazonaws.com/assets/confetti.min.js';
+                    const runtimeScript = document.getElementById('mf-runtime-js');
+                    const runtimeSrc = runtimeScript && runtimeScript.src;
+                    const cdnBase = (window.modalflow && window.modalflow._cdn) ? window.modalflow._cdn + '/' : '';
+                    const baseUrl = cdnBase || (runtimeSrc ? runtimeSrc.substring(0, runtimeSrc.lastIndexOf('/') + 1) : '/');
+                    const s3Url = baseUrl + 'assets/confetti.min.js';
 
                     const response = await fetch(s3Url);
                     const raw = await response.text();
@@ -578,23 +724,46 @@
         window.__MF_CURRENT_EXECUTION__ = { id: executionId, time: scriptExecStartTime };
 
         try {
-            function base64ToString(base64) {
+            function base64ToString(base64, fallback) {
               try {
+                fallback = (fallback === undefined || fallback === null) ? '[]' : String(fallback);
                 if (!base64 || base64.length === 0) {
-                  return '[]';
+                  return fallback;
                 }
+                const perfDebug = (window && window.__MF_PERF_DEBUG__) ? true : false;
+                const t0 = perfDebug && window.performance ? performance.now() : 0;
+
                 const latin1String = atob(base64);
+                if (typeof TextDecoder !== 'undefined') {
+                  const bytes = new Uint8Array(latin1String.length);
+                  for (let i = 0; i < latin1String.length; i++) {
+                    bytes[i] = latin1String.charCodeAt(i);
+                  }
+                  const decoded = new TextDecoder('utf-8').decode(bytes);
+                  if (perfDebug && window.performance) {
+                    const dt = performance.now() - t0;
+                    try { console.log('[MF PERF] base64 decode ms:', Math.round(dt)); } catch (_) { }
+                  }
+                  return decoded;
+                }
+
+                // Fallback for older browsers.
                 const utf8Encoded = latin1String.split('').map(c => {
-                    return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
+                  return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
                 }).join('');
-                return decodeURIComponent(utf8Encoded);
+                const decoded = decodeURIComponent(utf8Encoded);
+                if (perfDebug && window.performance) {
+                  const dt = performance.now() - t0;
+                  try { console.log('[MF PERF] base64 decode ms:', Math.round(dt)); } catch (_) { }
+                }
+                return decoded;
               } catch (e) {
-                return '[]';
+                return fallback || '[]';
               }
             }
             const guideData = (function(){ 
               try {
-                const decoded = base64ToString('${base64Guide}');
+                const decoded = base64ToString('${base64Guide}', '[]');
                 if (!decoded || decoded === '[]') {
                   return [];
                 }
@@ -614,7 +783,7 @@
             
             const setup = (function(){ 
               try { 
-                return JSON.parse(base64ToString('${base64Setup}')); 
+                return JSON.parse(base64ToString('${base64Setup}', '{}')); 
               } catch(e) { 
                 return {}; 
               } 
@@ -678,6 +847,9 @@
             '.mf-step-box{background:var(--mf-theme-background);border-radius:10px;padding:48px 24px 24px 24px !important;box-shadow:0 4px 20px var(--mf-theme-shadow);max-width:400px;width:90vw;position:relative;font-family:system-ui,-apple-system,sans-serif;font-size:14px;line-height:1.5;color:var(--mf-theme-text-primary);border:1px solid var(--mf-theme-border);}',
             '.mf-step-title{font-size:20px;font-weight:600;margin:0 0 12px 0;color:var(--mf-theme-text-primary);line-height:1.3;}',
             '.mf-step-content{color:var(--mf-theme-text-secondary);margin-bottom:20px;font-size:14px;line-height:1.6;}',
+            '.mf-step-body{overflow-x:hidden;}',
+            '.mf-step-body figure{margin:0;padding:0;}',
+            '.mf-step-box img{max-width:100%;height:auto;}',
             '.mf-btn{background:var(--mf-brand-background,var(--mf-theme-primary,#0d6efd));color:var(--mf-brand-text,var(--mf-theme-text-on-primary,#fff));border:2px solid var(--mf-brand-background,var(--mf-theme-primary,#0d6efd));padding:6px 14px;border-radius:8px;font-size:14px;font-weight:500;cursor:pointer;transition:background 0.2s,border-color 0.2s;outline:none;box-sizing:border-box;}',
             '.mf-btn:hover{background:var(--mf-brand-background-hover,var(--mf-theme-primary-hover,#0b5ed7));border-color:var(--mf-brand-background-hover,var(--mf-theme-primary-hover,#0b5ed7));}',
             '.mf-btn:active{background:var(--mf-brand-background-active,var(--mf-theme-primary-hover,#0a58ca));border-color:var(--mf-brand-background-active,var(--mf-theme-primary-hover,#0a58ca));}',
@@ -715,22 +887,22 @@
         ];
     };
     sdk._ensurePreviewStyles = function () {
-        if (document.getElementById('modalflow-preview-styles')) return;
+        if ((window.__mfGetById || document.getElementById.bind(document))('modalflow-preview-styles')) return;
         var st = document.createElement('style');
         st.id = 'modalflow-preview-styles';
         st.textContent = sdk._getPreviewStyles().join(' ');
-        (document.head || document.documentElement).appendChild(st);
+        __mfInjectStyle(st);
     };
 
     sdk._getInlineModalflowScript = function () {
         var previewStylesStr = sdk._getPreviewStyles().map(function (s) { return JSON.stringify(s); }).join(',\n              ');
         return `
       (function ensureStyles(){
-        if (document.getElementById('modalflow-preview-styles')) return;
+        if ((window.__mfGetById || document.getElementById.bind(document))('modalflow-preview-styles')) return;
         const st = document.createElement('style');
         st.id = 'modalflow-preview-styles';
         st.textContent = [ ${previewStylesStr} ].join(' ');
-        (document.head || document.documentElement).appendChild(st);
+        (window.__mfInjectStyle || function(e){(document.head||document.documentElement).appendChild(e)})(st);
       })();
       (function injectThemeAndBrand(){
         function hexToRgba(hex, alpha) {
@@ -749,12 +921,15 @@
             themeMode = String((setup && (setup.theme || (setup.settings && setup.settings.theme))) || 'light').toLowerCase();
           } catch (_) { themeMode = 'light'; }
           if (themeMode !== 'dark') themeMode = 'light';
+          // Set theme attribute on both documentElement (legacy) and the shadow host (shadow DOM)
           try { document.documentElement.setAttribute('data-mf-theme', themeMode); } catch (_) {}
-          if (!document.getElementById('modalflow-theme-defaults')) {
+          try { if (window.__mfShadowRoot && window.__mfShadowRoot.host) { window.__mfShadowRoot.host.setAttribute('data-mf-theme', themeMode); } } catch (_) {}
+          if (!(window.__mfGetById || document.getElementById.bind(document))('modalflow-theme-defaults')) {
             var sd = document.createElement('style');
             sd.id = 'modalflow-theme-defaults';
+            // Use :host for shadow DOM scope and :root as fallback for non-shadow contexts
             sd.textContent = [
-              ':root{',
+              ':root,:host{',
               '  --mf-theme-background:#ffffff;',
               '  --mf-theme-background-secondary:#f8fafc;',
               '  --mf-theme-text-primary:#111827;',
@@ -767,7 +942,7 @@
               '  --mf-theme-option-bg:#f8fafc;',
               '  --mf-theme-option-bg-active:rgba(13,110,253,0.12);',
               '}',
-              ':root[data-mf-theme="dark"]{',
+              ':root[data-mf-theme="dark"],:host([data-mf-theme="dark"]){',
               '  --mf-theme-background:#111827;',
               '  --mf-theme-background-secondary:#1f2937;',
               '  --mf-theme-text-primary:#f9fafb;',
@@ -782,15 +957,15 @@
               '  color-scheme: dark;',
               '}'
             ].join('');
-            (document.head || document.documentElement).appendChild(sd);
+            (window.__mfInjectStyle || function(e){(document.head||document.documentElement).appendChild(e)})(sd);
           }
         } catch (_) {}
 
-        if (!document.getElementById('modalflow-theme-vars') && setup.themeCSS) {
+        if (!(window.__mfGetById || document.getElementById.bind(document))('modalflow-theme-vars') && setup.themeCSS) {
           var st = document.createElement('style');
           st.id = 'modalflow-theme-vars';
           st.textContent = setup.themeCSS;
-          (document.head || document.documentElement).appendChild(st);
+          (window.__mfInjectStyle || function(e){(document.head||document.documentElement).appendChild(e)})(st);
         }
         
         try {
@@ -822,7 +997,7 @@
             };
           }
         } catch (_) { }
-        if (!document.getElementById('modalflow-brand-vars') && setup.brandColors) {
+        if (!(window.__mfGetById || document.getElementById.bind(document))('modalflow-brand-vars') && setup.brandColors) {
           var b = setup.brandColors;
           var parts = [];
           if (b.background) parts.push('--mf-brand-background:' + b.background);
@@ -837,8 +1012,8 @@
           if (parts.length) {
             var sb = document.createElement('style');
             sb.id = 'modalflow-brand-vars';
-            sb.textContent = ':root{' + parts.join(';') + '}';
-            (document.head || document.documentElement).appendChild(sb);
+            sb.textContent = ':root,:host{' + parts.join(';') + '}';
+            (window.__mfInjectStyle || function(e){(document.head||document.documentElement).appendChild(e)})(sb);
           }
         }
       })();
@@ -1017,7 +1192,14 @@
   
   function isExactElementMatch(element, expectedElement) {
       if (!element || !expectedElement) return false;
-  
+      if (expectedElement.text) {
+          const expectedText = (typeof expectedElement.text === 'string' ? expectedElement.text : (expectedElement.text && expectedElement.text.value != null ? String(expectedElement.text.value) : '')).trim();
+          if (expectedText) {
+              const elementText = (element.innerText || element.textContent || '').trim();
+              if (elementText !== expectedText) return false;
+          }
+      }
+
       if (expectedElement.class) {
           const expectedClasses = expectedElement.class.trim().split(/\s+/).sort().join(' ');
           const actualClasses = element.className.trim().split(/\s+/).sort().join(' ');
@@ -1104,8 +1286,7 @@
       const timeout = options.timeout || 300;
   
       await waitForDOMReady();
-      await new Promise(resolve => setTimeout(resolve, 200));
-  
+      // Try immediately first — no fixed delay on first attempt.
       const startTime = Date.now();
       let attempts = 0;
   
@@ -1591,7 +1772,7 @@
               }
           }
   
-          document.body.appendChild(beacon);
+          (window.__mfAppendUI || function(e){document.body.appendChild(e)})(beacon);
           updateBeaconPosition();
   
           const handleScroll = (event) => {
@@ -1633,7 +1814,19 @@
   
               if (currentY !== lastScrollY || currentX !== lastScrollX) {
                   updateBeaconPosition();
-              }
+              }else{
+                const checkTarget = currentTargetRef.current;
+                if (checkTarget && document.body.contains(checkTarget)) {
+                    const freshRect = checkTarget.getBoundingClientRect();
+                    if (lastRect && (
+                        freshRect.top !== lastRect.top ||
+                        freshRect.left !== lastRect.left
+                    )) {
+                        lastRect = null; // force full recalculation
+                        updatePosition(true);
+                    }
+                }
+            }
   
               lastScrollY = currentY;
               lastScrollX = currentX;
@@ -1659,16 +1852,16 @@
   }
   function removeAllBoxes() {
       try {
-          const beacons = document.querySelectorAll('.mf-beacon');
+          const beacons = (window.__mfQueryAll || document.querySelectorAll.bind(document))('.mf-beacon');
           beacons.forEach(b => {
               if (b._cleanup) b._cleanup();
               b.remove();
           });
   
-          const arrows = document.querySelectorAll('.mf-floating-arrow');
+          const arrows = (window.__mfQueryAll || document.querySelectorAll.bind(document))('.mf-floating-arrow');
           arrows.forEach(a => a.remove());
   
-          const boxes = document.querySelectorAll('[data-modalflow-box="1"]');
+          const boxes = (window.__mfQueryAll || document.querySelectorAll.bind(document))('[data-modalflow-box="1"]');
           boxes.forEach(e => e.remove());
       } catch (e) {
           console.error('[Modalflow] Error removing boxes:', e);
@@ -1739,7 +1932,7 @@
               }
           };
   
-          document.body.appendChild(tooltip);
+          (window.__mfAppendUI || function(e){document.body.appendChild(e)})(tooltip);
           updateTooltipPosition();
   
           const handleScroll = () => updateTooltipPosition();
@@ -1982,7 +2175,7 @@
       const canvas = document.createElement('canvas');
       canvas.id = 'mf-confetti-canvas';
       canvas.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:1000002;';
-      document.body.appendChild(canvas);
+      (window.__mfAppendUI || function(e){document.body.appendChild(e)})(canvas);
       const ctx = canvas.getContext('2d');
       const resize = () => { canvas.width = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0); canvas.height = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0); };
       resize();
@@ -2017,12 +2210,12 @@
       try {
           if (typeof ConfettiGenerator === 'function') {
               var id = 'mf-confetti-canvas';
-              var canvas = document.getElementById(id);
+              var canvas = (window.__mfGetById || document.getElementById.bind(document))(id);
               if (!canvas) {
                   canvas = document.createElement('canvas');
                   canvas.id = id;
                   canvas.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:1000002;';
-                  document.body.appendChild(canvas);
+                  (window.__mfAppendUI || function(e){document.body.appendChild(e)})(canvas);
               }
               var confettiSettings = { target: id, max: 180, size: 1.2, animate: true, respawn: false, props: ['square', 'circle', 'triangle', 'line'] };
               var confettiJs = new ConfettiGenerator(confettiSettings);
@@ -2099,6 +2292,10 @@
               if (!Number.isFinite(start) && Number.isFinite(end)) return now <= end;
               return false;
           }
+          // Element-based triggers (used by hidden steps + trigger blocks)
+          if (type === 'element' || type === 'element_exists' || type === 'css_selector' || type === 'cssselector') {
+              return evaluateElementCondition(cond);
+          }
       } catch (_) { }
       return false;
   }
@@ -2119,7 +2316,7 @@
               conditionMet = evaluateUrlCondition(trigger);
           } else if (type === 'current_time') {
               conditionMet = evaluateTimeCondition(trigger);
-          } else if (type === 'element_exists' || type === 'css_selector') {
+          } else if (type === 'element' || type === 'element_exists' || type === 'css_selector' || type === 'cssselector') {
               conditionMet = evaluateElementCondition(trigger);
           }
   
@@ -2175,11 +2372,133 @@
   
   function evaluateElementCondition(trigger) {
       try {
-          const selector = String(trigger.selector || trigger.value || '');
-          if (!selector) return false;
-          const element = document.querySelector(selector);
-          return !!element;
-      } catch (e) {
+          const norm = (v) => String(v == null ? "" : v).toLowerCase().replace(/[\s_-]+/g, "");
+
+          // Resolve selector(s) from multiple possible shapes.
+          let selectorsToTry = [];
+          let index = null;
+          let indexMap = null;
+
+          // Newer shapes: selectedElementValues.element
+          try {
+              if (trigger && trigger.selectedElementValues && trigger.selectedElementValues.element) {
+                  const el = trigger.selectedElementValues.element || {};
+                  if (el.cssSelector) selectorsToTry.unshift(String(el.cssSelector).trim());
+                  if (Array.isArray(el.cssSelectors)) selectorsToTry = selectorsToTry.concat(el.cssSelectors.map(s => String(s).trim()).filter(Boolean));
+                  if (el.indexMap && typeof el.indexMap === 'object') indexMap = el.indexMap;
+                  const idx = el.elementIndex !== undefined ? el.elementIndex : el.index;
+                  if (idx !== undefined && idx !== null && idx !== "") index = Number(idx);
+              }
+          } catch (_) { }
+
+          // Old API shapes: element_picker_content.selectedElementValues.element
+          try {
+              const picker = trigger && (trigger.element_picker_content || trigger.elementPickerContent);
+              if (picker && picker.selectedElementValues && picker.selectedElementValues.element) {
+                  const el = picker.selectedElementValues.element || {};
+                  if (el.cssSelector) selectorsToTry.unshift(String(el.cssSelector).trim());
+                  if (Array.isArray(el.cssSelectors)) selectorsToTry = selectorsToTry.concat(el.cssSelectors.map(s => String(s).trim()).filter(Boolean));
+                  if (el.indexMap && typeof el.indexMap === 'object') indexMap = el.indexMap;
+                  const idx = el.elementIndex !== undefined ? el.elementIndex : el.index;
+                  if (idx !== undefined && idx !== null && idx !== "") index = Number(idx);
+              }
+          } catch (_) { }
+
+          // Old API shapes: element_selector is often a JSON string with cssSelectors + indexMap.
+          try {
+              const rawMeta = trigger && (trigger.element_selector || trigger.elementSelector);
+              if (rawMeta) {
+                  const meta = (typeof rawMeta === 'string') ? JSON.parse(rawMeta) : rawMeta;
+                  if (meta && typeof meta === 'object') {
+                      if (meta.cssSelector) selectorsToTry.unshift(String(meta.cssSelector).trim());
+                      if (Array.isArray(meta.cssSelectors)) selectorsToTry = selectorsToTry.concat(meta.cssSelectors.map(s => String(s).trim()).filter(Boolean));
+                      if (meta.indexMap && typeof meta.indexMap === 'object') indexMap = meta.indexMap;
+                      const idx = meta.elementIndex !== undefined ? meta.elementIndex : meta.index;
+                      if (idx !== undefined && idx !== null && idx !== "") index = Number(idx);
+                      if (Array.isArray(meta.selectorInfo) && meta.selectorInfo.length) {
+                          const best = [...meta.selectorInfo].sort((a, b) => {
+                              if ((b && b.specificity) !== (a && a.specificity)) return (b.specificity || 0) - (a.specificity || 0);
+                              return (a.matches || 0) - (b.matches || 0);
+                          })[0];
+                          if (best && best.selector) {
+                              selectorsToTry.unshift(String(best.selector).trim());
+                              const bIdx = best.index !== undefined ? best.index : (meta.indexMap ? meta.indexMap[best.selector] : undefined);
+                              if (bIdx !== undefined && bIdx !== null && bIdx !== "") index = Number(bIdx);
+                          }
+                      }
+                  }
+              }
+          } catch (_) { }
+
+          // Simple fallback shapes.
+          try {
+              const s = String((trigger && (trigger.selector || trigger.value)) || "").trim();
+              if (s) selectorsToTry.unshift(s);
+          } catch (_) { }
+          try {
+              const gm = trigger && trigger.goManualValues;
+              if (gm) {
+                  const css = gm.cssSelector && gm.cssSelector.value;
+                  if (css && String(css).trim()) selectorsToTry.unshift(String(css).trim());
+              }
+          } catch (_) { }
+
+          selectorsToTry = Array.from(new Set(selectorsToTry.filter(Boolean).map(s => String(s).trim()).filter(Boolean)));
+          if (!selectorsToTry.length) return false;
+
+          let el = null;
+          for (const sel of selectorsToTry) {
+              try {
+                  const idxForSel = (indexMap && Object.prototype.hasOwnProperty.call(indexMap, sel)) ? Number(indexMap[sel]) : index;
+                  if (idxForSel !== null && idxForSel !== undefined && Number.isFinite(idxForSel)) {
+                      const all = document.querySelectorAll(sel);
+                      el = all[idxForSel] || all[0] || null;
+                  } else {
+                      el = document.querySelector(sel);
+                  }
+              } catch (_) {
+                  el = null;
+              }
+              if (el) break;
+          }
+
+          const option = norm(trigger && (trigger.option || trigger.optionValue || trigger.condition || trigger.state || trigger.element_state || trigger.elementState || ""));
+
+          // Default: "is present"
+          if (!option || option === "ispresent" || option === "present" || option === "isexists" || option === "exists") return !!el;
+          if (option === "isnotpresent" || option === "notpresent" || option === "doesnotexist" || option === "isnotexists") return !el;
+          if (!el) return false;
+
+          const isDisabled = (node) => {
+              try {
+                  if (!node) return false;
+                  if (node.disabled === true) return true;
+                  const aria = node.getAttribute && node.getAttribute("aria-disabled");
+                  if (aria && String(aria).toLowerCase() === "true") return true;
+                  if (node.hasAttribute && node.hasAttribute("disabled")) return true;
+              } catch (_) { }
+              return false;
+          };
+          if (option === "isdisabled" || option === "disabled") return isDisabled(el);
+          if (option === "isnotdisabled" || option === "notdisabled" || option === "enabled") return !isDisabled(el);
+
+          // Clicked tracking: treat as "was clicked last" in this tab.
+          try {
+              if (!window.__MF_LAST_CLICKED_TARGET__) {
+                  window.__MF_LAST_CLICKED_TARGET__ = null;
+                  document.addEventListener("click", function (evt) {
+                      try { window.__MF_LAST_CLICKED_TARGET__ = evt && evt.target ? evt.target : null; } catch (_) { }
+                  }, true);
+              }
+          } catch (_) { }
+          const last = window.__MF_LAST_CLICKED_TARGET__;
+          const wasClicked = !!(last && (last === el || (el.contains && el.contains(last))));
+          if (option === "isclicked" || option === "clicked") return wasClicked;
+          if (option === "isnotclicked" || option === "notclicked") return !wasClicked;
+
+          // Fallback: presence
+          return !!el;
+      } catch (_) {
           return false;
       }
   }
@@ -2256,6 +2575,12 @@
       try {
           if (!block) return [];
           if (Array.isArray(block.conditions)) return block.conditions;
+          if (Array.isArray(block.triggers)) return block.triggers;
+          const content = Array.isArray(block.content) ? block.content : [];
+          const direct = content.find((c) => c && Array.isArray(c.triggers));
+          if (direct && Array.isArray(direct.triggers)) return direct.triggers;
+          const list = content.filter((c) => c && c.optionType === 'triggerConditions' && Array.isArray(c.triggers));
+          if (list.length) return list.flatMap((c) => (Array.isArray(c.triggers) ? c.triggers : []));
       } catch (_) { }
       return [];
   }
@@ -2816,7 +3141,7 @@
   
   function removeAllBoxes() {
       try {
-          const els = document.querySelectorAll('[data-modalflow-box="1"]');
+          const els = (window.__mfQueryAll || document.querySelectorAll.bind(document))('[data-modalflow-box="1"]');
           els.forEach(e => {
               if (e._cleanupTooltipListeners && typeof e._cleanupTooltipListeners === 'function') {
                   try {
@@ -2828,7 +3153,7 @@
               e.remove();
           });
           
-          const avatars = document.querySelectorAll('[data-modalflow-avatar="1"]');
+          const avatars = (window.__mfQueryAll || document.querySelectorAll.bind(document))('[data-modalflow-avatar="1"]');
           avatars.forEach(av => av.remove());
       } catch (_) { }
   }
@@ -2881,7 +3206,7 @@
   }
   
   try {
-      const existingOverlay = document.getElementById('modalflow-guide-overlay');
+      const existingOverlay = (window.__mfGetById || document.getElementById.bind(document))('modalflow-guide-overlay');
       if (existingOverlay) {
           if (!window.__MF_FLOW_STACK__) window.__MF_FLOW_STACK__ = [];
           const existingFlowId = existingOverlay.getAttribute('data-flow-id');
@@ -2892,9 +3217,9 @@
               existingOverlay.remove();
           }
       }
-      document.querySelectorAll('[data-modalflow-box="1"]').forEach(el => el.remove());
-      document.querySelectorAll('.mf-beacon').forEach(el => el.remove());
-      document.querySelectorAll('[data-mf-highlight]').forEach(el => el.remove());
+      (window.__mfQueryAll || document.querySelectorAll.bind(document))('[data-modalflow-box="1"]').forEach(el => el.remove());
+      (window.__mfQueryAll || document.querySelectorAll.bind(document))('.mf-beacon').forEach(el => el.remove());
+      (window.__mfQueryAll || document.querySelectorAll.bind(document))('[data-mf-highlight]').forEach(el => el.remove());
   } catch (_) { }
   
   const currentFlowId = window.__CURRENT_FLOW_ID__ || '';
@@ -2904,9 +3229,16 @@
       'data-flow-id': currentFlowId,
       style: "position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 999999; font-family: sans-serif;"
   });
-  document.body.appendChild(overlay);
+  (window.__mfAppendUI || function(e){document.body.appendChild(e)})(overlay);
   
-  let __MF_timers = [];
+  // Hide launcher immediately now that the overlay is in the DOM
+  try {
+      var __mfActiveFlowId = window.__CURRENT_FLOW_ID__;
+      if (__mfActiveFlowId && window.modal && typeof window.modal._updateLauncherVisibilityForFlow === 'function') {
+          window.modal._updateLauncherVisibilityForFlow(__mfActiveFlowId);
+      }
+  } catch (_) {}
+  
   function trackTimer(id) { try { __MF_timers.push(id); } catch (_) { } }
   function clearPendingTimers() {
       try {
@@ -2919,7 +3251,7 @@
       const closeAll = opts.closeAll === true;
       let currentFlowId = null;
       try {
-          const ov = document.getElementById('modalflow-guide-overlay');
+          const ov = (window.__mfGetById || document.getElementById.bind(document))('modalflow-guide-overlay');
           if (ov) {
               currentFlowId = ov.getAttribute('data-flow-id');
           }
@@ -2962,7 +3294,7 @@
       
       try {
           let ov;
-          while ((ov = document.getElementById('modalflow-guide-overlay')) != null) {
+          while ((ov = (window.__mfGetById || document.getElementById.bind(document))('modalflow-guide-overlay')) != null) {
               ov.remove();
           }
       } catch (_) { }
@@ -3003,15 +3335,24 @@
           const restartBtn = mkBtn('Start over');
           const returnBtn = mkBtn('Return to guide');
           closeBtn.onclick = () => {
-              try { if (wrap.parentNode) document.body.removeChild(wrap); } catch (_) { }
+              try { if (wrap.parentNode) wrap.parentNode.removeChild(wrap); } catch (_) { }
               try { enableScroll(); endGuide({ closeAll: true }); } catch (_) { }
           };
-          restartBtn.onclick = () => { try { document.body.removeChild(wrap); } catch (_) { } try { removeAllBoxes(); renderStep(0); } catch (_) { } };
-          returnBtn.onclick = () => { try { document.body.removeChild(wrap); } catch (_) { } try { removeAllBoxes(); renderStep(__lastStepIndex); } catch (_) { } };
+          restartBtn.onclick = () => { try { if (wrap.parentNode) wrap.parentNode.removeChild(wrap); } catch (_) { } try { removeAllBoxes(); renderStep(0); } catch (_) { } };
+          returnBtn.onclick = () => { try { if (wrap.parentNode) wrap.parentNode.removeChild(wrap); } catch (_) { } try { removeAllBoxes(); renderStep(__lastStepIndex); } catch (_) { } };
           box.append(h, closeBtn, restartBtn, returnBtn);
           wrap.appendChild(box);
-          document.body.appendChild(wrap);
+          (window.__mfAppendUI || function(e){document.body.appendChild(e)})(wrap);
       } catch (_) { }
+  }
+  
+  function navigateToStep(targetIdx) {
+      const idx = Number(targetIdx);
+      if (!Number.isFinite(idx) || idx < 0 || idx >= guideData.length) return;
+      removeAllBoxes();
+      requestAnimationFrame(() => {
+          renderStep(idx);
+      });
   }
   
   async function renderStep(index) {
@@ -3021,9 +3362,13 @@
       if (!step) {
           return;
       }
+      const __mfStepTypeEarly =
+          (step && step.stepSettings && step.stepSettings.stepTypes && step.stepSettings.stepTypes.value)
+              ? String(step.stepSettings.stepTypes.value)
+              : String(step && (step.type || "modal"));
       overlay.innerHTML = "";
       overlay.style.pointerEvents = 'none';
-      const existingAvatars = document.querySelectorAll('[data-modalflow-avatar="1"]');
+      const existingAvatars = (window.__mfQueryAll || document.querySelectorAll.bind(document))('[data-modalflow-avatar="1"]');
       existingAvatars.forEach(av => av.remove());
       __lastStepIndex = index;
       try {
@@ -3031,7 +3376,12 @@
       } catch (_) { }
       try {
           const blocks = Array.isArray(step.blocks) ? step.blocks : [];
-          const triggerBlocks = blocks.filter(b => b && b.type === 'trigger');
+          let triggerBlocks = blocks.filter(b => b && b.type === 'trigger');
+          const legacyAdditionalBlocks = Array.isArray(step.additionalBlocks) ? step.additionalBlocks : [];
+          const legacyTriggerBlocks = legacyAdditionalBlocks.filter(b => b && (b.type === 'trigger' || /trigger/i.test(String(b.type || b.label || ''))));
+          if (triggerBlocks.length === 0 && legacyTriggerBlocks.length > 0) {
+              triggerBlocks = legacyTriggerBlocks;
+          }
           if (triggerBlocks.length > 0) {
               let triggerMatched = false;
               for (const trig of triggerBlocks) {
@@ -3039,20 +3389,92 @@
                   if (!conditionsPass) continue;
                   triggerMatched = true;
                   try {
-                      const actions = Array.isArray(trig.actions) ? trig.actions : [];
+                      let actions = Array.isArray(trig.actions) ? trig.actions : [];
+                      if (actions.length === 0 && Array.isArray(trig.content)) {
+                          const content = Array.isArray(trig.content) ? trig.content : [];
+                          const actHolder =
+                              content.find(c => c && (c.id === 'triggerBlockActionConditions' || c.type === 'actionConditions')) || trig;
+                          actions = Array.isArray(actHolder.actions)
+                              ? actHolder.actions
+                              : (Array.isArray(actHolder.values) ? actHolder.values : []);
+                      }
                       if (actions.length > 0) {
                           const defaultStepIndex = (index < guideData.length - 1) ? index + 1 : 0;
                           executeStepActions(actions, { sortDismissFirst: false, continueAfterStartFlow: true, defaultStepIndex: defaultStepIndex });
+                      } else if (__mfStepTypeEarly === "hidden") {
+                          const nextStepIndex = index + 1;
+                          if (nextStepIndex < guideData.length) {
+                              __lastStepIndex = nextStepIndex;
+                              removeAllBoxes();
+                              requestAnimationFrame(() => { renderStep(nextStepIndex); });
+                          } else {
+                              try { endGuide(); } catch (_) { }
+                          }
                       }
                   } catch (_) { }
                   break;
               }
               if (triggerMatched) return;
+              if (__mfStepTypeEarly === "hidden") {
+                  // Hidden step with failing trigger should WAIT (not skip).
+                  try {
+                      overlay.style.background = "transparent";
+                      overlay.style.pointerEvents = "none";
+                      overlay.innerHTML = "";
+                  } catch (_) { }
+                  try { removeAllBoxes(); } catch (_) { }
+                  trackTimer(setTimeout(() => { try { if (__lastStepIndex === index) renderStep(index); } catch (_) { } }, 600));
+                  return;
+              }
           }
       } catch (_) { }
+
+      // "hidden" steps run actions but render no UI.
+      if (__mfStepTypeEarly === "hidden") {
+          try { enableScroll(); } catch (_) { }
+          try {
+              overlay.style.background = "transparent";
+              overlay.style.pointerEvents = "none";
+              overlay.innerHTML = "";
+          } catch (_) { }
+          try { removeAllBoxes(); } catch (_) { }
+
+          let actions = [];
+          try { actions = Array.isArray(step.actions) ? step.actions : []; } catch (_) { actions = []; }
+          if ((!actions || actions.length === 0) && Array.isArray(step.additionalBlocks)) {
+              try {
+                  const ab = step.additionalBlocks;
+                  const ac = ab.find(b => b && (b.type === 'actionConditions' || /actionconditions/i.test(String(b.type || ''))));
+                  if (ac) {
+                      if (Array.isArray(ac.actions)) actions = ac.actions;
+                      else if (Array.isArray(ac.content)) {
+                          const c = ac.content.find(x => x && (x.type === 'actionConditions' || x.id === 'whenButtonClicked' || x.id === 'whenButtonElementIsClicked')) || ac;
+                          actions = Array.isArray(c.actions) ? c.actions : (Array.isArray(c.values) ? c.values : []);
+                      }
+                  }
+              } catch (_) { }
+          }
+          if (actions && actions.length) {
+              const hasNav = actions.some(a => {
+                  const t = String(a && (a.type || a.id || a.action || a.condition_type || '')).toLowerCase();
+                  return t === 'navigatetopage' || t === 'gotostep' || t === 'next' || t === 'dismissflow' || t === 'dismiss' || t === 'startflow' || t === 'start_flow';
+              });
+              const defaultStepIndex = (index < guideData.length - 1) ? index + 1 : 0;
+              executeStepActions(actions, { sortDismissFirst: false, continueAfterStartFlow: true, defaultStepIndex: defaultStepIndex });
+              if (hasNav) return;
+          }
+          const nextStepIndex = index + 1;
+          if (nextStepIndex < guideData.length) {
+              __lastStepIndex = nextStepIndex;
+              requestAnimationFrame(() => { renderStep(nextStepIndex); });
+          } else {
+              try { endGuide(); } catch (_) { }
+          }
+          return;
+      }
       setTimeout(() => renderBeaconForStep(step), 0);
 
-      const getStepType = (step) => step.type || "modal";
+      const getStepType = (step) => step.stepSettings?.stepTypes?.value || step.type || "modal";
       
       const getStepTheme = (step) => {
           if (!step.theme) return null;
@@ -3090,7 +3512,7 @@
               var o = { x: 0.5, y: 0.6 };
               if (stepType === 'bubble') {
                   o = { x: 0.06, y: 0.94 };
-              } else {
+              } else if (stepType === 'tooltip') {
                   try {
                       var rawSel = getTargetSelectorFromStep(step);
                       var sel = rawSel;
@@ -3136,7 +3558,14 @@
       if (stepType === "modal") {
           const modalWidth = width || 400; 
           stepBox.style.minWidth = modalWidth + 'px';
-          stepBox.style.width = '90vw'; 
+          stepBox.style.width = '90vw';
+          stepBox.style.position = 'fixed';
+          stepBox.style.top = '50%';
+          stepBox.style.left = '50%';
+          stepBox.style.right = 'auto';
+          stepBox.style.bottom = 'auto';
+          stepBox.style.margin = '0';
+          stepBox.style.transform = 'translate(-50%, -50%)';
           stepBox.style.maxHeight = '80vh';
           stepBox.style.overflow = 'hidden';
           stepBox.style.display = 'flex';
@@ -3659,15 +4088,9 @@
               const rect = targetElement.getBoundingClientRect();
               const windowHeight = window.innerHeight || document.documentElement.clientHeight;
               const windowWidth = window.innerWidth || document.documentElement.clientWidth;
-              
-              const isFullyVisible = (
-                  rect.top >= 0 &&
-                  rect.left >= 0 &&
-                  rect.bottom <= windowHeight &&
-                  rect.right <= windowWidth
-              );
-              
-              const shouldScroll = !isFullyVisible;
+              // Don't force-scroll when the target is only slightly clipped.
+              // Treat "partially visible" (within a margin) as good enough.
+              const shouldScroll = !isElementInViewport(targetElement, 100);
               
               const tooltipHeight = 200; // Approximate tooltip height
               if (!positionPref || positionPref === 'belowTarget') {
@@ -3684,9 +4107,10 @@
               if (shouldScroll) {
                   scrollToElementIfNeeded(targetElement, {
                       smooth: true,
-                      block: 'center',
-                      inline: 'center',
-                      requireFullVisibility: true // Require full visibility for tooltips
+                      // Keep scroll minimal (avoid horizontal centering jumps).
+                      block: 'nearest',
+                      inline: 'nearest',
+                      requireFullVisibility: false
                   });
               }
   
@@ -3735,94 +4159,131 @@
                           tail.style.position = 'absolute';
                           tail.style.width = '0';
                           tail.style.height = '0';
+                          tail.style.filter = theme === 'dark' ? 'drop-shadow(0 -1px 0 rgba(255,255,255,0.16))' : 'drop-shadow(0 -1px 0 #eaecf0)';
                           stepBox._tooltipTail = tail;
-  
-                          const setTailStyle = (pos) => {
-                              tail.style.borderLeft = '0';
-                              tail.style.borderRight = '0';
-                              tail.style.borderTop = '0';
-                              tail.style.borderBottom = '0';
-
-                              const tailColor = theme === 'dark' ? '#1f2937' : '#ffffff';
-                              if (pos === 'aboveTarget') {
-                                  tail.style.left = '20px';
-                                  tail.style.top = '100%';
-                                  tail.style.borderLeft = '10px solid transparent';
-                                  tail.style.borderRight = '10px solid transparent';
-                                  tail.style.borderTop = '10px solid ' + tailColor;
-                              } else if (pos === 'leftOfTarget') {
-                                  tail.style.top = '20px';
-                                  tail.style.left = '100%';
-                                  tail.style.borderTop = '10px solid transparent';
-                                  tail.style.borderBottom = '10px solid transparent';
-                                  tail.style.borderLeft = '10px solid ' + tailColor;
-                              } else if (pos === 'rightOfTarget') {
-                                  tail.style.top = '20px';
-                                  tail.style.left = '-10px';
-                                  tail.style.borderTop = '10px solid transparent';
-                                  tail.style.borderBottom = '10px solid transparent';
-                                  tail.style.borderRight = '10px solid ' + tailColor;
-                              } else { // belowTarget (default)
-                                  tail.style.left = '20px';
-                                  tail.style.top = '-10px';
-                                  tail.style.borderLeft = '10px solid transparent';
-                                  tail.style.borderRight = '10px solid transparent';
-                                  tail.style.borderBottom = '10px solid ' + tailColor;
-                              }
+                        const setTailStyle = (pos) => {
+                            const tailColor = theme === 'dark' ? '#111827' : '#ffffff';
+                            tail.style.border = '0';
+                            tail.style.left = 'auto';
+                            tail.style.right = 'auto';
+                            tail.style.top = 'auto';
+                            tail.style.bottom = 'auto';
+                            if (pos === 'aboveTarget') {
+                                tail.style.left = '20px';
+                                tail.style.top = '100%';
+                                tail.style.borderLeft = '10px solid transparent';
+                                tail.style.borderRight = '10px solid transparent';
+                                tail.style.borderTop = '10px solid ' + tailColor;
+                            }
+                            else if (pos === 'belowTarget') {
+                                tail.style.left = '20px';
+                                tail.style.bottom = '100%';
+                                tail.style.borderLeft = '10px solid transparent';
+                                tail.style.borderRight = '10px solid transparent';
+                                tail.style.borderBottom = '10px solid ' + tailColor;
+                            }
+                            else if (pos === 'leftOfTarget') {
+                                tail.style.top = '20px';
+                                tail.style.left = '100%';
+                                tail.style.borderTop = '10px solid transparent';
+                                tail.style.borderBottom = '10px solid transparent';
+                                tail.style.borderLeft = '10px solid ' + tailColor;
+                            }
+                            else if (pos === 'rightOfTarget') {
+                                tail.style.top = '20px';
+                                tail.style.right = '100%';
+                                tail.style.borderTop = '10px solid transparent';
+                                tail.style.borderBottom = '10px solid transparent';
+                                tail.style.borderRight = '10px solid ' + tailColor;
+                            }
+                            try { stepBox._tailPos = pos; } catch (_) { }
+                        };
+                          const normalizeTailPos = (p) => {
+                              try {
+                                  const s = String(p || '').toLowerCase();
+                                  if (!s) return p;
+                                  if (s === 'arrow-up') return 'belowTarget';
+                                  if (s === 'arrow-down') return 'aboveTarget';
+                                  if (s === 'arrow-left') return 'rightOfTarget';
+                                  if (s === 'arrow-right') return 'leftOfTarget';
+                                  if (s === 'left') return 'leftOfTarget';
+                                  if (s === 'right') return 'rightOfTarget';
+                                  if (s === 'top' || s === 'above') return 'aboveTarget';
+                                  if (s === 'bottom' || s === 'below') return 'belowTarget';
+                                  return p;
+                              } catch (_) { return p; }
                           };
-  
                           stepBox._setTailStyle = setTailStyle;
-                          setTailStyle(positionPref);
+                          setTailStyle(normalizeTailPos(positionPref));
                           stepBox.appendChild(tail);
                           addProgressBar(positionPref);
                           try { stepBox._progressBarEl = stepBox.querySelector('.mf-progress-bar'); } catch (_) { }
                           
                           const alignTailToTarget = () => {
-                              try {
-                                  const target = stepBox._targetElement;
-                                  const pos = stepBox._actualPosition || stepBox._positionPref;
-                                  const tail = stepBox._tooltipTail;
-  
-                                  if (!target || !target.getBoundingClientRect || !tail) {
-                                      return;
-                                  }
-  
-                                  const tRect2 = target.getBoundingClientRect();
-                                  const bRect = stepBox.getBoundingClientRect();
-                                  const centerX = tRect2.left + (tRect2.width / 2);
-                                  const centerY = tRect2.top + (tRect2.height / 2);
-  
-                                  if (pos === 'belowTarget' || !pos) {
-                                      const rel = Math.max(10, Math.min(bRect.width - 30, centerX - bRect.left));
-                                      tail.style.left = (rel - 10) + 'px';
-                                      tail.style.top = '-10px';
-                                  } else if (pos === 'aboveTarget') {
-                                      const rel = Math.max(10, Math.min(bRect.width - 30, centerX - bRect.left));
-                                      tail.style.left = (rel - 10) + 'px';
-                                      tail.style.top = '100%';
-                                  } else if (pos === 'rightOfTarget') {
-                                      const rel = Math.max(10, Math.min(bRect.height - 30, centerY - bRect.top));
-                                      tail.style.top = (rel - 10) + 'px';
-                                      tail.style.left = '-10px';
-                                  } else if (pos === 'leftOfTarget') {
-                                      const rel = Math.max(10, Math.min(bRect.height - 30, centerY - bRect.top));
-                                      tail.style.top = (rel - 10) + 'px';
-                                      tail.style.left = '100%';
-                                  }
-                              } catch (e) {
-                                  console.error('[Modalflow] Error aligning tail:', e);
-                              }
-                          };
+                                try {
+                                    const target = stepBox._targetElement;
+                                    if (!target || !target.getBoundingClientRect) {
+                                        return;
+                                    }
+
+                                    const tRect2 = target.getBoundingClientRect();
+                                    const bRect = stepBox.getBoundingClientRect();
+                                    let pos = normalizeTailPos(stepBox._actualPosition || stepBox._positionPref);
+                                    // Only override stored position when geometry clearly indicates a side.
+                                    // This avoids misclassifying "left/right" tooltips that were clamped vertically.
+                                    try {
+                                        const pad = 2;
+                                        const geom =
+                                            (bRect.right <= tRect2.left - pad) ? 'leftOfTarget' :
+                                            (bRect.left >= tRect2.right + pad) ? 'rightOfTarget' :
+                                            (bRect.bottom <= tRect2.top - pad) ? 'aboveTarget' :
+                                            (bRect.top >= tRect2.bottom + pad) ? 'belowTarget' :
+                                            null;
+                                        if (geom) pos = geom;
+                                    } catch (_) { }
+
+                                    // Ensure triangle direction matches the side we placed on.
+                                    try {
+                                        if (typeof stepBox._setTailStyle === 'function' && stepBox._tailPos !== pos) {
+                                            stepBox._setTailStyle(pos);
+                                        }
+                                    } catch (_) { }
+                                    const centerX = tRect2.left + (tRect2.width / 2);
+                                    const centerY = tRect2.top + (tRect2.height / 2);
+
+                                     if (pos === 'belowTarget' || !pos) {
+                                        const rel = Math.max(10, Math.min(bRect.width - 30, centerX - bRect.left));
+                                        tail.style.left = (rel - 10) + 'px';
+                                        tail.style.right = 'auto';
+                                        tail.style.bottom = '100%';
+                                        tail.style.top = 'auto';
+                                    } else if (pos === 'aboveTarget') {
+                                        const rel = Math.max(10, Math.min(bRect.width - 30, centerX - bRect.left));
+                                        tail.style.left = (rel - 10) + 'px';
+                                        tail.style.right = 'auto';
+                                        tail.style.top = '100%';
+                                        tail.style.bottom = 'auto';
+                                    } else if (pos === 'rightOfTarget') {
+                                        const rel = Math.max(10, Math.min(bRect.height - 30, centerY - bRect.top));
+                                        tail.style.top = (rel - 10) + 'px';
+                                        tail.style.right = '100%';
+                                        tail.style.left = 'auto';
+                                        tail.style.bottom = 'auto';
+                                    } else if (pos === 'leftOfTarget') {
+                                        const rel = Math.max(10, Math.min(bRect.height - 30, centerY - bRect.top));
+                                        tail.style.top = (rel - 10) + 'px';
+                                        tail.style.left = '100%';
+                                        tail.style.right = 'auto';
+                                        tail.style.bottom = 'auto';
+                                    }
+                                } catch (e) {
+                                    console.error('[Modalflow] Error aligning tail:', e);
+                                }
+                            };
                           
-                          stepBox._alignTailToTarget = alignTailToTarget;
-                          stepBox._positionTooltip = () => {
-                              placeNearTarget(targetElement, stepBox, stepType, positionPref, absXY);
-                              requestAnimationFrame(() => {
-                                  alignTailToTarget();
-                              });
-                          };
+                          let tooltipPositionRaf = null;
                           
-                          const updateTooltipPosition = () => {
+                          const applyTooltipPosition = () => {
                               try {
                                   if (!targetElement || !stepBox._targetElement) return;
                                   
@@ -3834,21 +4295,33 @@
                                   }
                                   
                                   placeNearTarget(targetElement, stepBox, stepType, positionPref, absXY);
-                                  
-                                  requestAnimationFrame(() => {
-                                      alignTailToTarget();
-                                  });
+                                   // Ensure tail orientation matches actual placed side.
+                                   try {
+                                       const posNow = normalizeTailPos(stepBox._actualPosition || stepBox._positionPref || positionPref);
+                                       if (typeof stepBox._setTailStyle === 'function' && stepBox._tailPos !== posNow) {
+                                           stepBox._setTailStyle(posNow);
+                                       }
+                                   } catch (_) { }
+                                  alignTailToTarget();
                               } catch (e) {
                                   console.error('[Modalflow] Error updating tooltip position:', e);
                               }
                           };
                           
+                          const scheduleTooltipReposition = () => {
+                              if (tooltipPositionRaf) return;
+                              tooltipPositionRaf = requestAnimationFrame(() => {
+                                  tooltipPositionRaf = null;
+                                  applyTooltipPosition();
+                              });
+                          };
+                          
                           const handleScroll = () => {
-                              requestAnimationFrame(updateTooltipPosition);
+                              scheduleTooltipReposition();
                           };
                           
                           const handleResize = () => {
-                              requestAnimationFrame(updateTooltipPosition);
+                              scheduleTooltipReposition();
                           };
                           
                           window.addEventListener('scroll', handleScroll, { passive: true, capture: true });
@@ -3864,6 +4337,10 @@
                           }
                           
                           stepBox._cleanupTooltipListeners = () => {
+                              if (tooltipPositionRaf) {
+                                  try { cancelAnimationFrame(tooltipPositionRaf); } catch (_) { }
+                                  tooltipPositionRaf = null;
+                              }
                               window.removeEventListener('scroll', handleScroll, { capture: true });
                               window.removeEventListener('resize', handleResize);
                               if (window.visualViewport) {
@@ -3874,14 +4351,15 @@
                                   targetElement.removeEventListener('click', runTooltipActions);
                               }
                           };
-                          
-                          placeNearTarget(targetElement, stepBox, stepType, positionPref, absXY);
-                          requestAnimationFrame(() => {
-                              alignTailToTarget();
-                          });
-                          requestAnimationFrame(() => {
-                              if (stepBox._positionTooltip) stepBox._positionTooltip();
-                          });
+
+                          // Avoid a 1-frame "center flash" before the tooltip is positioned.
+                          // placeNearTarget relies on layout metrics (offsetWidth/Height), so the box
+                          // must be in the DOM, but we can hide it until the first positioning pass.
+                          try { stepBox.style.visibility = 'hidden'; } catch (_) { }
+                          try { applyTooltipPosition(); } catch (_) { }
+                          try { stepBox.style.visibility = 'visible'; } catch (_) { }
+
+                          scheduleTooltipReposition();
                       }
                       stepBox.setAttribute('data-modalflow-box', '1');
   
@@ -3957,10 +4435,7 @@
 
                                           if (newTab) {
                                               window.open(String(newUrl), '_blank');
-                                              requestAnimationFrame(() => {
-                                                  removeAllBoxes();
-                                                  renderStep(targetIdx);
-                                              });
+                                              navigateToStep(targetIdx);
                                           } else {
                                               window.location.href = String(newUrl);
                                           }
@@ -3986,10 +4461,7 @@
                                           if (i >= 0) targetIdx = i;
                                       }
                                       if (Number.isFinite(targetIdx)) {
-                                          requestAnimationFrame(() => {
-                                              removeAllBoxes();
-                                              renderStep(Number(targetIdx));
-                                          });
+                                          navigateToStep(Number(targetIdx));
                                           return;
                                       }
                                   } else if (actionType === 'dismissflow' || actionType === 'dismiss') {
@@ -4094,7 +4566,7 @@
                                           const feedback = createEl('div', {
                                               style: 'position:fixed; top:20px; left:50%; transform:translateX(-50%); background:rgba(239,68,68,0.9); color:white; padding:12px 24px; border-radius:8px; z-index:1000; box-shadow:0 4px 6px rgba(0,0,0,0.1);'
                                           }, "You can only select up to " + maxSelection + " option" + (maxSelection > 1 ? 's' : ''));
-                                          document.body.appendChild(feedback);
+                                          (window.__mfAppendUI || function(e){document.body.appendChild(e)})(feedback);
                                           setTimeout(() => feedback.remove(), 2000);
                                           return;
                                       }
@@ -4151,7 +4623,7 @@
                                           const feedback = createEl('div', {
                                               style: 'position:fixed; top:20px; left:50%; transform:translateX(-50%); background:rgba(239,68,68,0.9); color:#fff; padding:12px 24px; border-radius:8px; z-index:1000; box-shadow:0 4px 6px rgba(0,0,0,0.1);'
                                           }, "You can only select up to " + maxSelection + " option" + (maxSelection > 1 ? 's' : ''));
-                                          document.body.appendChild(feedback);
+                                          (window.__mfAppendUI || function(e){document.body.appendChild(e)})(feedback);
                                           setTimeout(() => feedback.remove(), 2000);
                                           return;
                                       }
@@ -4464,7 +4936,7 @@
                           const feedback = createEl('div', {
                               style: 'position:fixed; top:20px; left:50%; transform:translateX(-50%); background:rgba(239,68,68,0.9); color:#fff; padding:12px 24px; border-radius:8px; z-index:1000; box-shadow:0 4px 6px rgba(0,0,0,0.1);'
                           }, message);
-                          document.body.appendChild(feedback);
+                          (window.__mfAppendUI || function(e){document.body.appendChild(e)})(feedback);
                           setTimeout(() => feedback.remove(), 2000);
                       };
                       
@@ -4522,8 +4994,7 @@
 
                                           if (newTab) {
                                               window.open(String(newUrl), '_blank');
-                                              removeAllBoxes();
-                                              renderStep(targetIdx);
+                                              navigateToStep(targetIdx);
                                           } else {
                                               window.location.href = String(newUrl);
                                           }
@@ -4549,8 +5020,7 @@
                                           if (i >= 0) targetIdx = i;
                                       }
                                       if (Number.isFinite(targetIdx)) {
-                                          removeAllBoxes();
-                                          renderStep(Number(targetIdx));
+                                          navigateToStep(Number(targetIdx));
                                           return;
                                       }
                                   } else if (actionType === 'dismissflow' || actionType === 'dismiss') {
@@ -4566,7 +5036,7 @@
 
                           if (actionExecuted) {
                               if (index < guideData.length - 1) {
-                                  renderStep(index + 1);
+                                  navigateToStep(index + 1);
                               } else {
                                   endGuide();
                               }
@@ -4574,7 +5044,7 @@
                       } catch (_) {
                           if (whenAnswerSubmittedItem && Array.isArray(whenAnswerSubmittedItem.actions) && whenAnswerSubmittedItem.actions.length > 0) {
                               if (index < guideData.length - 1) {
-                                  renderStep(index + 1);
+                                  navigateToStep(index + 1);
                               } else {
                                   endGuide();
                               }
@@ -4668,8 +5138,10 @@
               }
           } else {
               if (title) stepBox.append(title);
-              stepBox.append(content);
-              if (questionWrap) { stepBox.appendChild(questionWrap); }
+              const bodyWrap = createEl('div', { class: 'mf-step-body' });
+              bodyWrap.appendChild(content);
+              if (questionWrap) { bodyWrap.appendChild(questionWrap); }
+              stepBox.appendChild(bodyWrap);
               if (actionsWrap) { stepBox.appendChild(actionsWrap); }
           }
           
@@ -4770,8 +5242,8 @@
               if (type === "tooltip" || type === "bubble") {
                   const vw = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0);
                   const vh = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0);
-                  if (!document.body.contains(box)) {
-                      document.body.appendChild(box);
+                  if (!document.body.contains(box) && !(window.__mfShadowRoot && window.__mfShadowRoot.contains(box))) {
+                      (window.__mfAppendUI || function(e){document.body.appendChild(e)})(box);
                   }
 
                   let frameLeft = 0, frameTop = 0, frameW = vw, frameH = vh;
@@ -4854,6 +5326,8 @@
                           }
                       ];
 
+                      const previousPosition = positions.find(p => p.name === box._actualPosition);
+                      const previousStillFits = previousPosition && previousPosition.fits;
                       if (position) {
                           const preferred = positions.find(p => p.name === position);
                           if (preferred && preferred.fits) {
@@ -4861,13 +5335,13 @@
                               top = preferred.top;
                               finalPos = preferred.name;
                           } else {
-                              const available = positions.find(p => p.fits) || positions[0];
+                              const available = (previousStillFits ? previousPosition : null) || positions.find(p => p.fits) || positions[0];
                               left = available.left;
                               top = available.top;
                               finalPos = available.name;
                           }
                       } else {
-                          const available = positions.find(p => p.fits) || positions[3];
+                          const available = (previousStillFits ? previousPosition : null) || positions.find(p => p.fits) || positions[3];
                           left = available.left;
                           top = available.top;
                           finalPos = available.name;
@@ -4880,8 +5354,17 @@
                   box.style.left = left + "px";
                   box.style.top = top + "px";
 
-                  try { box._actualPosition = finalPos || position || "belowTarget"; } catch (_) { }
-                  try { if (typeof box._setTailStyle === 'function') box._setTailStyle(box._actualPosition); } catch (_) { }
+                  const nextActualPosition = finalPos || position || "belowTarget";
+                  const previousActualPosition = box._actualPosition;
+                  try { box._actualPosition = nextActualPosition; } catch (_) { }
+                  try {
+                     if (typeof box._setTailStyle === 'function') {
+                         // Update tail even when actualPosition is unchanged (tail element may be recreated).
+                         if (box._tailPos !== nextActualPosition || previousActualPosition !== nextActualPosition) {
+                             box._setTailStyle(nextActualPosition);
+                         }
+                     }
+                  } catch (_) { }
                   try {
                       const pb = box._progressBarEl || box.querySelector('.mf-progress-bar');
                       if (pb) {
@@ -4939,35 +5422,43 @@
                       const tail = createEl('div', {});
                       tail.className = 'mf-tooltip-tail';
                       tail.style.position = 'absolute';
+                      tail.style.filter = theme === 'dark' ? 'drop-shadow(0 -1px 0 rgba(255,255,255,0.16))' : 'drop-shadow(0 -1px 0 #eaecf0)';
                       const setTail = (pos) => {
-                          const tailColor = theme === 'dark' ? '#1f2937' : '#ffffff';
+                          const tailColor = theme === 'dark' ? '#111827' : '#ffffff';
+                          tail.style.border = '0';
+                          tail.style.left = 'auto';
+                          tail.style.right = 'auto';
+                          tail.style.top = 'auto';
+                          tail.style.bottom = 'auto';
                           if (pos === 'aboveTarget') {
-                              tail.style.left = '20px'; tail.style.top = (stepBox.offsetHeight) + 'px';
+                              tail.style.left = '20px';
+                              tail.style.top = '100%';
                               tail.style.borderLeft = '10px solid transparent';
                               tail.style.borderRight = '10px solid transparent';
                               tail.style.borderTop = '10px solid ' + tailColor;
-                              tail.style.borderBottom = '0';
                           } else if (pos === 'leftOfTarget') {
-                              tail.style.top = '20px'; tail.style.left = (stepBox.offsetWidth) + 'px';
+                              tail.style.top = '20px';
+                              tail.style.left = '100%';
                               tail.style.borderTop = '10px solid transparent';
                               tail.style.borderBottom = '10px solid transparent';
                               tail.style.borderLeft = '10px solid ' + tailColor;
-                              tail.style.borderRight = '0';
                           } else if (pos === 'rightOfTarget') {
-                              tail.style.top = '20px'; tail.style.left = '-10px';
+                              tail.style.top = '20px';
+                              tail.style.right = '100%';
                               tail.style.borderTop = '10px solid transparent';
                               tail.style.borderBottom = '10px solid transparent';
                               tail.style.borderRight = '10px solid ' + tailColor;
-                              tail.style.borderLeft = '0';
-                          } else { // belowTarget default
-                              tail.style.left = '20px'; tail.style.top = '-10px';
+                          } else {
+                              tail.style.left = '20px';
+                              tail.style.bottom = '100%';
                               tail.style.borderLeft = '10px solid transparent';
                               tail.style.borderRight = '10px solid transparent';
                               tail.style.borderBottom = '10px solid ' + tailColor;
-                              tail.style.borderTop = '0';
                           }
+                          try { stepBox._tailPos = pos; } catch (_) { }
                       };
-                      setTail(positionPref);
+                      stepBox._setTailStyle = setTail;
+                      setTail(stepBox._actualPosition || positionPref);
                       stepBox.appendChild(tail);
                       addProgressBar(positionPref);
                       
@@ -4977,19 +5468,42 @@
                               const bRect = stepBox.getBoundingClientRect();
                               const centerX = tRect2.left + (tRect2.width / 2);
                               const centerY = tRect2.top + (tRect2.height / 2);
-                              const pos = stepBox._actualPosition || positionPref;
+                              let pos = stepBox._actualPosition || positionPref;
+                              try {
+                                  const pad = 2;
+                                  const geom =
+                                      (bRect.right <= tRect2.left - pad) ? 'leftOfTarget' :
+                                      (bRect.left >= tRect2.right + pad) ? 'rightOfTarget' :
+                                      (bRect.bottom <= tRect2.top - pad) ? 'aboveTarget' :
+                                      (bRect.top >= tRect2.bottom + pad) ? 'belowTarget' :
+                                      null;
+                                  if (geom) pos = geom;
+                              } catch (_) { }
+                              try { if (typeof stepBox._setTailStyle === 'function' && stepBox._tailPos !== pos) stepBox._setTailStyle(pos); } catch (_) { }
                               if (pos === 'belowTarget' || !pos) {
                                   const rel = Math.max(10, Math.min(bRect.width - 10, centerX - bRect.left));
-                                  tail.style.left = (rel - 10) + 'px'; tail.style.top = '-10px';
+                                  tail.style.left = (rel - 10) + 'px';
+                                  tail.style.right = 'auto';
+                                  tail.style.bottom = '100%';
+                                  tail.style.top = 'auto';
                               } else if (pos === 'aboveTarget') {
                                   const rel = Math.max(10, Math.min(bRect.width - 10, centerX - bRect.left));
-                                  tail.style.left = (rel - 10) + 'px'; tail.style.top = (stepBox.offsetHeight) + 'px';
+                                  tail.style.left = (rel - 10) + 'px';
+                                  tail.style.right = 'auto';
+                                  tail.style.top = '100%';
+                                  tail.style.bottom = 'auto';
                               } else if (pos === 'rightOfTarget') {
                                   const rel = Math.max(10, Math.min(bRect.height - 10, centerY - bRect.top));
-                                  tail.style.top = (rel - 10) + 'px'; tail.style.left = '-10px';
+                                  tail.style.top = (rel - 10) + 'px';
+                                  tail.style.right = '100%';
+                                  tail.style.left = 'auto';
+                                  tail.style.bottom = 'auto';
                               } else if (pos === 'leftOfTarget') {
                                   const rel = Math.max(10, Math.min(bRect.height - 10, centerY - bRect.top));
-                                  tail.style.top = (rel - 10) + 'px'; tail.style.left = (stepBox.offsetWidth) + 'px';
+                                  tail.style.top = (rel - 10) + 'px';
+                                  tail.style.left = '100%';
+                                  tail.style.right = 'auto';
+                                  tail.style.bottom = 'auto';
                               }
                           } catch (_) { }
                       };
@@ -5013,7 +5527,7 @@
                       existingBubbleTails.forEach(t => t.remove());
   
                       const tail = createEl('div', {
-                          style: 'position:absolute; left:20px; bottom:-10px; width:0; height:0; border-left:10px solid transparent; border-right:10px solid transparent; border-top:10px solid ' + (theme === 'dark' ? '#1f2937' : '#ffffff') + ';'
+                          style: 'position:absolute; left:20px; bottom:-10px; width:0; height:0; border-left:10px solid transparent; border-right:10px solid transparent; border-top:10px solid ' + (theme === 'dark' ? '#111827' : '#ffffff') + '; filter: drop-shadow(0 -1px 0 ' + (theme === 'dark' ? 'rgba(255,255,255,0.16)' : '#eaecf0') + ');'
                       });
                       tail.className = 'mf-tooltip-tail';
                       stepBox.appendChild(tail);
@@ -5027,8 +5541,12 @@
                       });
                       avatarContainer.setAttribute('data-modalflow-avatar', '1');
                       
+                      const _rtScript = document.getElementById('mf-runtime-js');
+                      const _rtSrc = _rtScript && _rtScript.src;
+                      const _cdnBase = (window.modalflow && window.modalflow._cdn) ? window.modalflow._cdn + '/' : '';
+                      const _baseUrl = _cdnBase || (_rtSrc ? _rtSrc.substring(0, _rtSrc.lastIndexOf('/') + 1) : '/');
                       const avatar = createEl('img', {
-                          src: 'https://hlptflowbuilder.s3.us-east-1.amazonaws.com/assets/avatar.svg',
+                          src: _baseUrl + 'assets/avatar.svg',
                           alt: 'Avatar',
                           style: 'width:56px; height:56px; border-radius:50%; object-fit:cover;'
                       });
@@ -5040,7 +5558,7 @@
                       if (absXY || selectedRect) {
                           overlay.style.background = 'transparent';
                           overlay.style.pointerEvents = 'none';
-                          document.body.appendChild(stepBox);
+                          (window.__mfAppendUI || function(e){document.body.appendChild(e)})(stepBox);
                           const px = absXY ? absXY.x : (selectedRect ? selectedRect.x : 0);
                           const py = absXY ? absXY.y : (selectedRect ? selectedRect.y + (selectedRect.height || 0) + 10 : 0);
                           placeNearTarget({ getBoundingClientRect: () => ({ left: px, top: py, right: px, bottom: py }) }, stepBox, stepType, positionPref, { x: px, y: py });
@@ -5191,7 +5709,7 @@
       window[flowInstanceKey] = true;
       
       setTimeout(function() {
-          renderStep(startStep);
+          navigateToStep(startStep);
           
           setTimeout(function() {
               window[globalLockKey] = false;
@@ -5204,7 +5722,7 @@
   window.__START_MODALFLOW__ = function(){
     try {
         try {
-          const existingOverlay = document.getElementById('modalflow-guide-overlay');
+          const existingOverlay = (window.__mfGetById || document.getElementById.bind(document))('modalflow-guide-overlay');
           if (existingOverlay) {
               existingOverlay.remove();
           }
@@ -5213,9 +5731,9 @@
       } catch(_) {}
       const forced = readForcedStartStep();
       if (Number.isFinite(forced) && forced >= 0 && forced < guideData.length) {
-        renderStep(forced);
+        navigateToStep(forced);
       } else {
-        renderStep(0);
+        navigateToStep(0);
       }
     } catch(err) {
       console.error('[Modalflow] Error in manual start:', err);
@@ -5225,7 +5743,7 @@
   window.__START_MODALFLOW_FORCE__ = function(){
     try { 
       try {
-          const existingOverlay = document.getElementById('modalflow-guide-overlay');
+          const existingOverlay = (window.__mfGetById || document.getElementById.bind(document))('modalflow-guide-overlay');
           if (existingOverlay) {
               existingOverlay.remove();
           }
@@ -5233,7 +5751,7 @@
           cleanupAllBeaconsAndTooltips();
       } catch(_) {}
       
-      renderStep(0); 
+      navigateToStep(0); 
     } catch(err) {
       console.error('[Modalflow] Error in force start:', err);
     }
@@ -5278,7 +5796,7 @@
                     delete window[executionKey + '_TIME'];
                     return;
                 }
-                await new Promise(resolve => setTimeout(resolve, 100));
+                // No fixed delay here; flow data is ready once resolved.
             }
             
             if (!sdk._flowObjects || !sdk._flowObjects[flowId]) {
@@ -5321,7 +5839,7 @@
             if (existingScript) {
                 if (window.__START_MODALFLOW__) {
                     existingScript.remove();
-                    const oldOverlay = document.getElementById('modalflow-guide-overlay');
+                    const oldOverlay = (window.__mfGetById || document.getElementById.bind(document))('modalflow-guide-overlay');
                     if (oldOverlay) oldOverlay.remove();
 
                     let setupConfig = sdk._flowsetup[flowId] || {};
@@ -5816,8 +6334,8 @@
 
     sdk._getLauncherElementsByLauncherId = function (launcherId) {
         return {
-            button: document.getElementById(sdk._getLauncherElementId(launcherId, false)),
-            attached: document.getElementById(sdk._getLauncherElementId(launcherId, true))
+            button: (window.__mfGetById || document.getElementById.bind(document))(sdk._getLauncherElementId(launcherId, false)),
+            attached: (window.__mfGetById || document.getElementById.bind(document))(sdk._getLauncherElementId(launcherId, true))
         };
     };
 
@@ -5880,7 +6398,7 @@
             delete launcher.dataset.isHovering;
         });
 
-        document.body.appendChild(launcher);
+        __mfAppendUI(launcher);
     };
 
     sdk._getPositionStyles = function (pos, setupConfig) {
@@ -5939,47 +6457,51 @@
             console.error('[ModalFlow] Failed to save dismissal state:', e);
         }
     };
-    /**
-     * Determine the correct z-index for an attached launcher.
-     *
-     * Two modes:
-     * A) User has explicitly configured a z-index (setupConfig.zIndexIsDefault === false)
-     *    → return that value exactly, no scanning. Respect their intent.
-     *
-     * B) No user override (setupConfig.zIndexIsDefault === true, i.e. the "576" default)
-     *    → Scan every positioned element on the page and find the highest z-index.
-     *      Place the launcher at max + 1, so it is always above every existing element
-     *      without hardcoding a magic number that causes z-index wars.
-     *      Capped at 2147483647 (browser max).
-     *
-     * @param {Element|null} targetElement  The element the launcher is attached to.
-     * @param {object}       setupConfig    The launcher's setup config object.
-     * @returns {number}
-     */
+
     sdk._getLauncherZIndex = function (targetElement, setupConfig) {
         try {
+
             if (setupConfig && setupConfig.zIndexIsDefault === false) {
                 const z = parseFloat(setupConfig.zIndex);
                 if (Number.isFinite(z)) return z;
             }
 
+
             var maxZ = 0;
-            try {
-                var all = document.querySelectorAll('*');
-                for (var i = 0; i < all.length; i++) {
-                    var el = all[i];
-                    if (el.id && el.id.indexOf('modal-flow-launcher') === 0) continue;
-                    if (el.id && el.id.indexOf('modalflow') === 0) continue;
-                    try {
+
+            if (targetElement) {
+                try {
+                    var el = targetElement;
+                    while (el && el !== document.documentElement) {
                         var cs = window.getComputedStyle(el);
-                        if (cs.position === 'static') continue;
-                        var z = parseInt(cs.zIndex, 10);
-                        if (!isNaN(z) && z > maxZ) maxZ = z;
-                    } catch (_) {}
+                        if (cs.position !== 'static') {
+                            var z = parseInt(cs.zIndex, 10);
+                            if (!isNaN(z) && z > maxZ) maxZ = z;
+                        }
+                        el = el.parentElement;
+                    }
+                } catch (_) {}
+            }
+
+
+            try {
+                var roots = [document.body, document.documentElement];
+                for (var r = 0; r < roots.length; r++) {
+                    var children = roots[r] ? roots[r].children : [];
+                    for (var i = 0; i < children.length; i++) {
+                        var child = children[i];
+                        if (child.id && (child.id.indexOf('modal-flow-launcher') === 0 || child.id.indexOf('modalflow') === 0 || child.id === 'mf-shadow-host')) continue;
+                        try {
+                            var cs = window.getComputedStyle(child);
+                            if (cs.position === 'static') continue;
+                            var z = parseInt(cs.zIndex, 10);
+                            if (!isNaN(z) && z > maxZ) maxZ = z;
+                        } catch (_) {}
+                    }
                 }
             } catch (_) {}
-            var result = maxZ > 0 ? maxZ + 1 : 100;
 
+            var result = maxZ > 0 ? maxZ + 1 : 100;
             return Math.min(result, 2147483647);
         } catch (e) {
             return 100;
@@ -5994,7 +6516,7 @@
         if (!isOperationAllowed()) {
             return;
         }
-        
+        if (!sdk._selectorCache) sdk._selectorCache = new Map();
         const tooltipOptions = behaviour?.tooltip?.options || {};
         const hasDismissAfterFirstActivation = tooltipOptions.hasOwnProperty('dismissAfterFirstActivation');
         const dismissAfterFirstActivationValue = tooltipOptions.dismissAfterFirstActivation;
@@ -6075,46 +6597,89 @@
             launcher.style.opacity = '0';
             launcher.style.pointerEvents = 'none';
 
-            document.body.appendChild(launcher);
+            __mfAppendUI(launcher);
 
             const currentTargetRef = { current: targetElement };
 
             const resolveElementBySelectorData = (selectorData) => {
                 if (!selectorData) return null;
                 try {
+
+                    const normalizeText = (t) => String(t || '').replace(/\s+/g, ' ').trim();
+                    const expectedText = selectorData.text ? normalizeText(selectorData.text) : null;
+
+
+                    const textMatches = (candidate) => {
+                        if (!expectedText) return true; // no text to verify against
+                        const actual = normalizeText(candidate.innerText || candidate.textContent || '');
+
+                        return actual === expectedText || actual.startsWith(expectedText) || expectedText.startsWith(actual);
+                    };
+
+
+                    const tryXPath = (xpath) => {
+                        if (!xpath) return null;
+                        try {
+                            const result = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+                            const node = result && result.singleNodeValue;
+                            return (node && document.body.contains(node)) ? node : null;
+                        } catch (_) { return null; }
+                    };
+
+
+                    const pickBest = (candidates, recordedIndex) => {
+                        if (!candidates || candidates.length === 0) return null;
+                        const arr = Array.from(candidates);
+
+                        if (expectedText) {
+                            const textMatch = arr.find(c => textMatches(c));
+                            if (textMatch) return textMatch;
+                        }
+
+                        const idx = (recordedIndex !== undefined && recordedIndex !== null) ? Number(recordedIndex) : 0;
+                        return arr[idx < arr.length ? idx : 0] || null;
+                    };
+
                     let el = null;
-                    if (selectorData.selector) {
-                        const matches = document.querySelectorAll(selectorData.selector);
-                        const idx = selectorData.index || 0;
-                        if (matches.length > idx) el = matches[idx];
-                        else if (matches.length > 0 && selectorData.indexMap && Object.keys(selectorData.indexMap).length > 0) {
-                            for (const [sel, mapIdx] of Object.entries(selectorData.indexMap)) {
-                                try {
-                                    const m = document.querySelectorAll(sel);
-                                    if (m.length > mapIdx) { el = m[mapIdx]; break; }
-                                } catch (e) { continue; }
+
+
+                    if (!el && selectorData.xpath) {
+                        const xpathEl = tryXPath(selectorData.xpath);
+                        if (xpathEl) el = xpathEl;
+                    }
+
+
+                    if (!el && selectorData.selector) {
+                        try {
+                            const candidates = document.querySelectorAll(selectorData.selector);
+                            if (candidates.length > 0) {
+                                el = pickBest(candidates, selectorData.index);
                             }
-                        } else if (matches.length > 0) el = matches[0];
+                        } catch (_) {}
                     }
                     if (!el && selectorData.indexMap && typeof selectorData.indexMap === 'object') {
-                        for (const [sel, idx] of Object.entries(selectorData.indexMap)) {
+                        for (const [sel, mapIdx] of Object.entries(selectorData.indexMap)) {
                             try {
-                                const m = document.querySelectorAll(sel);
-                                if (m.length > idx) { el = m[idx]; break; }
-                            } catch (e) { continue; }
+                                const candidates = document.querySelectorAll(sel);
+                                if (candidates.length > 0) {
+                                    const candidate = pickBest(candidates, mapIdx);
+                                    if (candidate) { el = candidate; break; }
+                                }
+                            } catch (_) { continue; }
                         }
                     }
-                    if (!el && selectorData.cssSelectors && Array.isArray(selectorData.cssSelectors) && selectorData.cssSelectors.length > 0) {
+
+                    // 4. Fallback cssSelectors list
+                    if (!el && selectorData.cssSelectors && Array.isArray(selectorData.cssSelectors)) {
                         for (const sel of selectorData.cssSelectors) {
                             if (!sel || sel === selectorData.selector) continue;
                             try {
-                                const m = document.querySelectorAll(sel);
-                                if (m.length > 0) {
-                                    const ti = (selectorData.index || 0) < m.length ? (selectorData.index || 0) : 0;
-                                    el = m[ti];
-                                    break;
+                                const candidates = document.querySelectorAll(sel);
+                                if (candidates.length > 0) {
+                                    const candidate = pickBest(candidates, selectorData.index);
+                                    if (candidate) { el = candidate; break; }
                                 }
-                            } catch (e) { continue; }
+                            } catch (_) { continue; }
                         }
                     }
                     return (el && document.body.contains(el)) ? el : null;
@@ -6130,7 +6695,38 @@
             let customViewportBounds = null;
             const isInFixedContainer = currentTargetRef.current ? sdk._isElementInFixedContainer(currentTargetRef.current) : false;
             let lastRect = null; // Track last known rect position for change detection
-            let rafId = null; // Track requestAnimationFrame ID for cleanup
+            let scheduledRaf = null;
+            let pendingForceUpdate = false;
+            let targetMutationObserver = null;
+
+            const scheduleUpdate = (forceUpdate) => {
+                pendingForceUpdate = pendingForceUpdate || !!forceUpdate;
+                if (scheduledRaf) return;
+                scheduledRaf = requestAnimationFrame(() => {
+                    scheduledRaf = null;
+                    const force = pendingForceUpdate;
+                    pendingForceUpdate = false;
+                    updatePosition(force);
+                });
+            };
+
+            const observeTargetMutations = (el) => {
+                try {
+                    if (targetMutationObserver) {
+                        try { targetMutationObserver.disconnect(); } catch (_) { }
+                        targetMutationObserver = null;
+                    }
+                    if (!el || !el.nodeType) return;
+                    targetMutationObserver = new MutationObserver(() => {
+                        scheduleUpdate(true);
+                    });
+                    targetMutationObserver.observe(el, {
+                        attributes: true,
+                        childList: true,
+                        subtree: false
+                    });
+                } catch (_) { }
+            };
 
             const updatePosition = (forceUpdate) => {
                 try {
@@ -6146,7 +6742,47 @@
                         const coords = positioningData.savedCoordinates;
                         const element = coords.element || {};
                         const selectorData = positioningData.selectorData;
-                        const liveElement = (element.cssSelector && selectorData) ? resolveElementBySelectorData(selectorData) : null;
+                    const cacheKey = selectorData ? JSON.stringify({
+                            sel: selectorData.selector,
+                            idx: selectorData.index,
+                            text: selectorData.text
+                        }) : null;
+                        
+                        let liveElement = null;
+                        if (cacheKey && sdk._selectorCache.has(cacheKey)) {
+                            const cached = sdk._selectorCache.get(cacheKey);
+                            // verify it's still in DOM
+                            if (cached && document.body.contains(cached)) {
+                                liveElement = cached;
+                            } else {
+                                sdk._selectorCache.delete(cacheKey); // stale, remove it
+                            }
+                        }
+                        if (!liveElement) {
+                            liveElement = resolveElementBySelectorData(selectorData);
+                            if (liveElement && cacheKey) {
+                                sdk._selectorCache.set(cacheKey, liveElement);
+                            }
+                        }
+
+                        // If still not found, try selectorInfo entries as individual selector lookups
+                        if (!liveElement && selectorData && Array.isArray(selectorData.selectorInfo) && selectorData.selectorInfo.length > 0) {
+                            const sorted = [...selectorData.selectorInfo].sort((a, b) => {
+                                if (b.specificity !== a.specificity) return (b.specificity || 0) - (a.specificity || 0);
+                                return (b.matches !== a.matches) ? (a.matches - b.matches) : 0; // fewer matches = more specific
+                            });
+                            for (const info of sorted) {
+                                if (!info || !info.selector) continue;
+                                const syntheticSD = {
+                                    selector: info.selector,
+                                    index: info.index,
+                                    text: selectorData.text,
+                                    xpath: null // xpath already tried above
+                                };
+                                liveElement = resolveElementBySelectorData(syntheticSD);
+                                if (liveElement) break;
+                            }
+                        }
 
                         if (liveElement) {
                             const liveRect = liveElement.getBoundingClientRect();
@@ -6174,55 +6810,72 @@
                                 width: liveRect.width,
                                 height: liveRect.height
                             };
+                            observeTargetMutations(liveElement);
+
+                            initialScrollX = null;
+                            initialScrollY = null;
+                            apiCoords = null;
                         } else {
+
                             lastRect = null;
-                            if (customViewportBounds === null && element) {
+
+
+                            const savedAbsLeft = coords.left || element.targetX1Absolute || 0;
+                            const savedAbsTop  = coords.top  || element.targetY1Absolute || 0;
+                            const savedWidth   = coords.width  || element.width  || 0;
+                            const savedHeight  = coords.height || element.height || 0;
+                            const savedAbsRight  = coords.right  || (savedAbsLeft + savedWidth);
+                            const savedAbsBottom = coords.bottom || (savedAbsTop  + savedHeight);
+                            const savedAbsCenterX = element.centerX || coords.centerX || (savedAbsLeft + savedWidth / 2);
+                            const savedAbsCenterY = element.centerY || coords.centerY || (savedAbsTop  + savedHeight / 2);
+
+                            if (customViewportBounds === null) {
                                 customViewportBounds = {
-                                    x: element.targetX1Absolute || 0,
-                                    y: element.targetY1Absolute || 0,
-                                    width: coords.width || 0,
-                                    height: coords.height || 0
+                                    x: savedAbsLeft - currentScrollX,
+                                    y: savedAbsTop  - currentScrollY,
+                                    width: savedWidth,
+                                    height: savedHeight
                                 };
                             }
 
-                            if (initialScrollX === null) {
-                                initialScrollX = coords.scrollX || element.scrollX || currentScrollX;
-                                initialScrollY = coords.scrollY || element.scrollY || currentScrollY;
-
-                                apiCoords = {
-                                    left: coords.left || element.targetX1Absolute || 0,
-                                    top: coords.top || element.targetY1Absolute || 0,
-                                    right: coords.right || element.targetX2Absolute || 0,
-                                    bottom: coords.bottom || element.targetY2Absolute || 0,
-                                    width: coords.width || 0,
-                                    height: coords.height || 0,
-                                    centerX: element.centerX || coords.centerX || 0,
-                                    centerY: element.centerY || coords.centerY || 0
-                                };
-                            }
-
-                            let scrollDiffX = 0;
-                            let scrollDiffY = 0;
-                            if (!isInFixedContainer) {
-                                scrollDiffX = currentScrollX - initialScrollX;
-                                scrollDiffY = currentScrollY - initialScrollY;
-                            }
+                            // Viewport position = absolute position âˆ’ current scroll.
+                            const scrollX = isInFixedContainer ? 0 : currentScrollX;
+                            const scrollY = isInFixedContainer ? 0 : currentScrollY;
                             rect = {
-                                left: apiCoords.left - scrollDiffX,
-                                top: apiCoords.top - scrollDiffY,
-                                right: apiCoords.right - scrollDiffX,
-                                bottom: apiCoords.bottom - scrollDiffY,
-                                width: apiCoords.width,
-                                height: apiCoords.height,
-                                centerX: apiCoords.centerX - scrollDiffX,
-                                centerY: apiCoords.centerY - scrollDiffY
+                                left:    savedAbsLeft   - scrollX,
+                                top:     savedAbsTop    - scrollY,
+                                right:   savedAbsRight  - scrollX,
+                                bottom:  savedAbsBottom - scrollY,
+                                width:   savedWidth,
+                                height:  savedHeight,
+                                centerX: savedAbsCenterX - scrollX,
+                                centerY: savedAbsCenterY - scrollY
                             };
                         }
                     }
                     else if (positioningData.mode !== 'selectElement') {
                         let currentTarget = currentTargetRef.current;
                         if (!currentTarget || !document.body.contains(currentTarget)) {
-                            currentTarget = resolveElementBySelectorData(positioningData.selectorData);
+                            const cacheKey2 = positioningData.selectorData ? JSON.stringify({
+                                sel: positioningData.selectorData.selector,
+                                idx: positioningData.selectorData.index,
+                                text: positioningData.selectorData.text
+                            }) : null;
+                            
+                            if (cacheKey2 && sdk._selectorCache.has(cacheKey2)) {
+                                const cached2 = sdk._selectorCache.get(cacheKey2);
+                                if (cached2 && document.body.contains(cached2)) {
+                                    currentTarget = cached2;
+                                } else {
+                                    sdk._selectorCache.delete(cacheKey2);
+                                }
+                            }
+                            if (!currentTarget) {
+                                currentTarget = resolveElementBySelectorData(positioningData.selectorData);
+                                if (currentTarget && cacheKey2) {
+                                    sdk._selectorCache.set(cacheKey2, currentTarget);
+                                }
+                            }
                             if (currentTarget) {
                                 currentTargetRef.current = currentTarget;
                                 lastRect = null;
@@ -6230,6 +6883,7 @@
                                     launcher._resizeObserver.disconnect();
                                     launcher._resizeObserver.observe(currentTarget);
                                 }
+                                observeTargetMutations(currentTarget);
                             } else {
                                 return;
                             }
@@ -6333,11 +6987,13 @@
                     launcher.style.top = '0';
                     if (!setupConfig || setupConfig.zIndexIsDefault !== false) {
                         try {
-                            const liveTarget = currentTargetRef.current || targetElement;
-                            const liveZ = sdk._getLauncherZIndex(liveTarget, setupConfig || {});
-                            const liveZStr = String(liveZ);
-                            if (launcher.style.zIndex !== liveZStr) {
-                                launcher.style.zIndex = liveZStr;
+                            if (!sdk._isFlowActive()) {
+                                const liveTarget = currentTargetRef.current || targetElement;
+                                const liveZ = sdk._getLauncherZIndex(liveTarget, setupConfig || {});
+                                const liveZStr = String(liveZ);
+                                if (launcher.style.zIndex !== liveZStr) {
+                                    launcher.style.zIndex = liveZStr;
+                                }
                             }
                         } catch (_) {}
                     }
@@ -6345,7 +7001,9 @@
                     if (!hasInitializedPosition) {
                         hasInitializedPosition = true;
                         launcher.style.opacity = '1';
-                        launcher.style.pointerEvents = 'auto';
+                        if (!sdk._isFlowActive()) {
+                            launcher.style.pointerEvents = 'auto';
+                        }
                     }
 
                     let inView = true;
@@ -6366,23 +7024,25 @@
                             launcher.style.pointerEvents = 'none';
                         } else {
                             launcher.style.opacity = '1';
-                            launcher.style.pointerEvents = 'auto';
+                            if (!sdk._isFlowActive()) {
+                                launcher.style.pointerEvents = 'auto';
+                            }
                         }
                     }
 
                 } catch (e) {
-                    console.error('[ModalFlow] âŒ updatePosition error: ' + (e ? (e.message || (typeof e.toString === 'function' ? e.toString() : String(e))) : 'unknown'));
+                    console.error('[ModalFlow] Ã¢ÂÅ’ updatePosition error: ' + (e ? (e.message || (typeof e.toString === 'function' ? e.toString() : String(e))) : 'unknown'));
                 }
             };
 
             const handleScroll = () => {
-                requestAnimationFrame(updatePosition);
+                scheduleUpdate(false);
             };
 
             const handleResize = () => {
                 clearTimeout(launcher._resizeTimeout);
                 launcher._resizeTimeout = setTimeout(() => {
-                    requestAnimationFrame(updatePosition);
+                    scheduleUpdate(true);
                 }, 100);
             };
 
@@ -6402,11 +7062,29 @@
             if (currentTargetRef.current) {
                 try {
                     const resizeObserver = new ResizeObserver(() => {
-                        requestAnimationFrame(updatePosition);
+                        scheduleUpdate(true);
                     });
                     resizeObserver.observe(currentTargetRef.current);
                     launcher._resizeObserver = resizeObserver;
-
+                    try {
+                        const mutationObserver = new MutationObserver(() => {
+                            const checkTarget = currentTargetRef.current;
+                            if (!checkTarget || !document.body.contains(checkTarget)) return;
+                            const freshRect = checkTarget.getBoundingClientRect();
+                            if (lastRect && (
+                                Math.abs(freshRect.top - lastRect.top) > 1 ||
+                                Math.abs(freshRect.left - lastRect.left) > 1
+                            )) {
+                                lastRect = null;
+                                scheduleUpdate(true);
+                            }
+                        });
+                        mutationObserver.observe(document.body, {
+                            childList: true,
+                            subtree: false  // only top-level changes like banner insertion
+                        });
+                        launcher._mutationObserver = mutationObserver;
+                    } catch (_) {}
                     if (positioningData.mode === 'selectElement' && positioningData.selectorData) {
                         const liveElement = resolveElementBySelectorData(positioningData.selectorData);
                         if (liveElement && liveElement !== currentTargetRef.current) {
@@ -6414,24 +7092,9 @@
                         }
                     }
                 } catch (e) {
-                    console.warn('[ModalFlow] âš ï¸ ResizeObserver not supported');
+                    console.warn('[ModalFlow] - ResizeObserver not supported');
                 }
             }
-
-            let lastScrollY = window.pageYOffset || document.documentElement.scrollTop;
-            let lastScrollX = window.pageXOffset || document.documentElement.scrollLeft;
-
-            const scrollDetectionInterval = setInterval(() => {
-                const currentX = window.pageXOffset || document.documentElement.scrollLeft;
-                const currentY = window.pageYOffset || document.documentElement.scrollTop;
-
-                if (currentY !== lastScrollY || currentX !== lastScrollX) {
-                    updatePosition();
-                }
-
-                lastScrollY = currentY;
-                lastScrollX = currentX;
-            }, 100);
 
             launcher.addEventListener('mouseover', (e) => {
                 launcher.dataset.isHovering = 'true';
@@ -6453,6 +7116,7 @@
             });
 
             requestAnimationFrame(() => {
+                observeTargetMutations(currentTargetRef.current);
                 updatePosition();
                 setTimeout(() => {
                     updatePosition();
@@ -6463,70 +7127,20 @@
                 }, 200);
             });
 
-            const continuousUpdate = () => {
-                if (!document.body.contains(launcher)) {
-                    return;
-                }
-                
-                if (positioningData.mode === 'selectElement' && positioningData.savedCoordinates) {
-                    if (positioningData.selectorData) {
-                        try {
-                            const liveElement = resolveElementBySelectorData(positioningData.selectorData);
-                            if (liveElement && document.body.contains(liveElement)) {
-                                const liveRect = liveElement.getBoundingClientRect();
-                                const visible = liveRect.bottom > 0 &&
-                                    liveRect.top < window.innerHeight &&
-                                    liveRect.right > 0 &&
-                                    liveRect.left < window.innerWidth;
-                                if (visible) {
-                                    if (!lastRect ||
-                                        lastRect.top !== liveRect.top ||
-                                        lastRect.left !== liveRect.left ||
-                                        lastRect.width !== liveRect.width ||
-                                        lastRect.height !== liveRect.height) {
-                                        updatePosition(true);
-                                    }
-                                }
-                            }
-                        } catch (e) {
-                            // Continue tracking even if selector fails
-                        }
-                    }
-                } else if (positioningData.mode !== 'selectElement') {
-                    const currentTarget = currentTargetRef.current;
-                    if (!currentTarget || !document.body.contains(currentTarget)) {
-                        updatePosition(true);
-                    } else {
-                        const elementRect = currentTarget.getBoundingClientRect();
-                        const visible = elementRect.bottom > 0 &&
-                            elementRect.top < window.innerHeight &&
-                            elementRect.right > 0 &&
-                            elementRect.left < window.innerWidth;
-                        if (visible) {
-                            if (!lastRect ||
-                                lastRect.top !== elementRect.top ||
-                                lastRect.left !== elementRect.left ||
-                                lastRect.width !== elementRect.width ||
-                                lastRect.height !== elementRect.height) {
-                                updatePosition(true);
-                            }
-                        }
-                    }
-                }
-                
-                rafId = requestAnimationFrame(continuousUpdate);
-            };
-            
-            rafId = requestAnimationFrame(continuousUpdate);
-
             launcher._updatePosition = updatePosition;
 
             launcher._cleanup = () => {
-                if (rafId !== null) {
-                    cancelAnimationFrame(rafId);
-                    rafId = null;
+                if (scheduledRaf !== null) {
+                    try { cancelAnimationFrame(scheduledRaf); } catch (_) { }
+                    scheduledRaf = null;
                 }
-                
+                if (launcher._mutationObserver) {
+                    launcher._mutationObserver.disconnect();
+                }
+                if (targetMutationObserver) {
+                    try { targetMutationObserver.disconnect(); } catch (_) { }
+                    targetMutationObserver = null;
+                }
                 window.removeEventListener('resize', handleResize);
 
                 scrollTargets.forEach(target => {
@@ -6544,7 +7158,6 @@
                 }
 
                 clearTimeout(launcher._resizeTimeout);
-                clearInterval(scrollDetectionInterval);
             };
 
         } catch (error) {
@@ -7043,7 +7656,7 @@
             const behaviourType = String(config.type || '').toLowerCase();
             if ((behaviourType === 'show_tooltip' || config.tooltip) && isTriggerEvent) {
                 if (triggerType === 'click') {
-                    const ov = document.getElementById('modal-launcher-tooltip-overlay');
+                    const ov = (window.__mfGetById || document.getElementById.bind(document))('modal-launcher-tooltip-overlay');
                     if (ov && ov.dataset.launcherId === actualLauncherId && typeof ov._closeTooltip === 'function') {
                         ov._closeTooltip();
                         return;
@@ -7166,7 +7779,7 @@
         }
     };
     sdk._showTooltipModal = function (behaviour, event, triggerType, launcherId, refKey) {
-        if (document.getElementById('modal-launcher-tooltip-overlay')) {
+        if ((window.__mfGetById || document.getElementById.bind(document))('modal-launcher-tooltip-overlay')) {
             return;
         }
 
@@ -7222,17 +7835,17 @@
         const launcherSetup = sdk._launcherSetupConfigs?.[launcherId] || {};
         const themeMode = launcherSetup.theme || 'light';
         if (launcherSetup.themeCSS) {
-            let themeEl = document.getElementById('modalflow-theme-vars');
+            let themeEl = (window.__mfGetById || document.getElementById.bind(document))('modalflow-theme-vars');
             if (!themeEl) {
                 themeEl = document.createElement('style');
                 themeEl.id = 'modalflow-theme-vars';
-                (document.head || document.documentElement).appendChild(themeEl);
+                __mfInjectStyle(themeEl);
             }
             themeEl.textContent = launcherSetup.themeCSS;
         }
 
         const brand = sdk._flowstyle?.base_colors?.brand || launcherSetup.brandColors;
-        if (brand && !document.getElementById('modalflow-brand-vars')) {
+        if (brand && !(window.__mfGetById || document.getElementById.bind(document))('modalflow-brand-vars')) {
             const parts = [];
             if (brand.background) parts.push('--mf-brand-background:' + brand.background);
             if (brand.backgroundHover) parts.push('--mf-brand-background-hover:' + brand.backgroundHover);
@@ -7246,8 +7859,8 @@
             if (parts.length) {
                 const st = document.createElement('style');
                 st.id = 'modalflow-brand-vars';
-                st.textContent = ':root{' + parts.join(';') + '}';
-                (document.head || document.documentElement).appendChild(st);
+                st.textContent = ':root,:host{' + parts.join(';') + '}';
+                __mfInjectStyle(st);
             }
         }
         sdk._ensurePreviewStyles();
@@ -7428,7 +8041,7 @@
         }
         overlay.appendChild(tooltip);
 
-        document.body.appendChild(overlay);
+        (window.__mfAppendUI || function(e){document.body.appendChild(e)})(overlay);
 
         if (launcherElement) {
             const launcherRect = launcherElement.getBoundingClientRect();
@@ -7920,12 +8533,12 @@
         }
     };
     sdk._isFlowActive = function () {
-        const overlay = document.getElementById('modalflow-guide-overlay');
+        const overlay = (window.__mfGetById || document.getElementById.bind(document))('modalflow-guide-overlay');
         if (overlay) {
             return true;
         }
 
-        const boxes = document.querySelectorAll('[data-modalflow-box="1"]');
+        const boxes = (window.__mfQueryAll || document.querySelectorAll.bind(document))('[data-modalflow-box="1"]');
         if (boxes && boxes.length > 0) {
             return true;
         }
@@ -8072,6 +8685,28 @@
         if (shouldShow) {
             sdk._setLauncherDisplay(buttonLauncher, 'inline-block');
             sdk._setLauncherDisplay(attachedLauncher, 'inline-flex');
+            // If the flow is active and the launcher is configured to remain visible,
+            // it must still sit BELOW the overlay and be non-interactive.
+            if (isFlowActive) {
+                if (buttonLauncher) {
+                    buttonLauncher.style.setProperty('pointer-events', 'none', 'important');
+                    buttonLauncher.style.setProperty('z-index', '999998', 'important');
+                }
+                if (attachedLauncher) {
+                    attachedLauncher.style.setProperty('pointer-events', 'none', 'important');
+                    attachedLauncher.style.setProperty('z-index', '999998', 'important');
+                }
+            } else {
+                // Flow not active — restore normal interactivity
+                if (buttonLauncher) {
+                    buttonLauncher.style.removeProperty('pointer-events');
+                    buttonLauncher.style.removeProperty('z-index');
+                }
+                if (attachedLauncher) {
+                    attachedLauncher.style.removeProperty('pointer-events');
+                    attachedLauncher.style.removeProperty('z-index');
+                }
+            }
         } else {
             sdk._setLauncherDisplay(buttonLauncher, 'none');
             sdk._setLauncherDisplay(attachedLauncher, 'none');
@@ -8084,7 +8719,7 @@
             try {
                 flowId = sessionStorage.getItem('modalflow_active_flow_id');
                 if (!flowId) {
-                    var ov = document.getElementById('modalflow-guide-overlay');
+                    var ov = (window.__mfGetById || document.getElementById.bind(document))('modalflow-guide-overlay');
                     if (ov && ov.dataset.flowId) flowId = ov.dataset.flowId;
                 }
             } catch (e) {}
@@ -8094,17 +8729,17 @@
             } catch (e) {}
             try {
                 var o;
-                while ((o = document.getElementById('modalflow-guide-overlay')) != null) o.remove();
+                while ((o = (window.__mfGetById || document.getElementById.bind(document))('modalflow-guide-overlay')) != null) o.remove();
             } catch (e) {}
             try {
-                document.querySelectorAll('[data-modalflow-box="1"], .mf-step-box').forEach(function (el) {
+                (window.__mfQueryAll || document.querySelectorAll.bind(document))('[data-modalflow-box="1"], .mf-step-box').forEach(function (el) {
                     try { if (el._cleanupTooltipListeners && typeof el._cleanupTooltipListeners === 'function') el._cleanupTooltipListeners(); } catch (_) {}
                     el.remove();
                 });
             } catch (e) {}
             
             try {
-                const beacons = document.querySelectorAll('.mf-beacon');
+                const beacons = (window.__mfQueryAll || document.querySelectorAll.bind(document))('.mf-beacon');
                 beacons.forEach(b => {
                     try {
                         if (b._cleanup) b._cleanup();
@@ -8114,7 +8749,7 @@
             } catch (e) {}
             
             try {
-                const tooltips = document.querySelectorAll('.mf-tooltip, .mf-tooltip-box');
+                const tooltips = (window.__mfQueryAll || document.querySelectorAll.bind(document))('.mf-tooltip, .mf-tooltip-box');
                 tooltips.forEach(t => {
                     try {
                         t.remove();
@@ -8153,7 +8788,7 @@
             if (sessionStorage.getItem('modalflow_active_flow_id')) return;
             document.body.classList.remove('modalflow-active');
             var e;
-            while ((e = document.getElementById('modalflow-guide-overlay')) != null) e.remove();
+            while ((e = (window.__mfGetById || document.getElementById.bind(document))('modalflow-guide-overlay')) != null) e.remove();
             document.querySelectorAll('[data-modalflow-box="1"], .mf-step-box').forEach(function (el) {
                 try { if (el._cleanupTooltipListeners && typeof el._cleanupTooltipListeners === 'function') el._cleanupTooltipListeners(); } catch (_) {}
                 el.remove();
@@ -8374,6 +9009,7 @@
     };
 
     sdk._handleUrlChange = async function () {
+        if (sdk._selectorCache) sdk._selectorCache.clear();
         try {
             const hasActiveFlow = sdk._isFlowActive();
             let flowWasDismissed = false;
@@ -8381,7 +9017,7 @@
             if (hasActiveFlow) {
                 let activeFlowId = null;
                 try {
-                    const overlay = document.getElementById('modalflow-guide-overlay');
+                    const overlay = (window.__mfGetById || document.getElementById.bind(document))('modalflow-guide-overlay');
                     if (overlay && overlay.dataset.flowId) {
                         activeFlowId = overlay.dataset.flowId;
                     } else {
@@ -8500,7 +9136,7 @@
                         if (sdk._isFlowActive()) {
                             try {
                                 let activeFlowId = null;
-                                const overlay = document.getElementById('modalflow-guide-overlay');
+                                const overlay = (window.__mfGetById || document.getElementById.bind(document))('modalflow-guide-overlay');
                                 if (overlay && overlay.dataset.flowId) {
                                     activeFlowId = overlay.dataset.flowId;
                                 } else {
@@ -8680,23 +9316,39 @@
     };
 
     sdk._autoInit = function () {
+        var flowId, refKey, autoStart, envKey;
+
         const scripts = document.querySelectorAll('script[src*="modal-flowbuilder.js"], script[src*="mf-flowbuilder.js"]');
-
         for (const script of scripts) {
-            const flowId = script.getAttribute('data-flow-id');
-            const refKey = script.getAttribute('data-refKey') || script.getAttribute('data-ref-key');
-            const autoStart = script.getAttribute('data-auto-start');
-            const envKey = script.getAttribute('data-env-key');
+            flowId = script.getAttribute('data-flow-id') || flowId;
+            refKey = script.getAttribute('data-refKey') || script.getAttribute('data-ref-key') || refKey;
+            autoStart = script.getAttribute('data-auto-start') || autoStart;
+            envKey = script.getAttribute('data-env-key') || envKey;
+        }
 
-            if (refKey) {
-                sdk._init(refKey);
-
-                if (envKey) {
-                    window.__modalFlowEnvKey = envKey;
+        try {
+            if (window.modalflow && Array.isArray(window.modalflow._q)) {
+                for (var i = 0; i < window.modalflow._q.length; i++) {
+                    var method = window.modalflow._q[i][0], args = window.modalflow._q[i][1];
+                    if (method === 'init' && args.length > 0) {
+                        envKey = envKey || args[0];
+                        var opts = args[1] || {};
+                        refKey = refKey || opts.licenseKey || opts.refKey;
+                        flowId = flowId || opts.flowId;
+                        if (opts.autoStart !== undefined) autoStart = opts.autoStart ? 'true' : autoStart;
+                    }
                 }
-                const shouldSkipAutoStart = autoStart !== 'true';
-                sdk._initModalFlow(flowId || null, refKey, { skipAutoStart: shouldSkipAutoStart, envKey: envKey });
             }
+        } catch (e) {}
+
+        if (refKey) {
+            sdk._init(refKey);
+
+            if (envKey) {
+                window.__modalFlowEnvKey = envKey;
+            }
+            const shouldSkipAutoStart = autoStart !== 'true';
+            sdk._initModalFlow(flowId || null, refKey, { skipAutoStart: shouldSkipAutoStart, envKey: envKey });
         }
     };
 
@@ -8712,7 +9364,7 @@
                 var st = document.createElement('style');
                 st.id = 'modalflow-stray-hide-styles';
                 st.textContent = 'body:not(.modalflow-active) > .mf-step-box{visibility:hidden!important;opacity:0!important;pointer-events:none!important;}';
-                (document.head || document.documentElement).appendChild(st);
+                (window.__mfInjectStyle || function(e){(document.head||document.documentElement).appendChild(e)})(st);
             }
         } catch (e) {}
         try { sdk._flushQueue(); } catch (e) {}

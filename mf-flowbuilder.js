@@ -1,5 +1,4 @@
 (function () {
-    // Guard: ensure we're running in a proper browser window context
     try {
         if (typeof window === 'undefined' || typeof document === 'undefined') return;
     } catch (e) { return; }
@@ -9,29 +8,66 @@
 
     //let autoStartTriggered = false;
     //let initTriggered = false;
-    // Get reference to the current script tag (may be null in some async-loaded contexts)
     var currentScript;
     try { currentScript = document.currentScript; } catch (e) { currentScript = null; }
 
-    // Safe attribute reader
     function getAttr(el, name, fallback) {
         try { return (el && el.getAttribute(name)) || fallback || ''; } catch (e) { return fallback || ''; }
     }
 
-    // Read configuration from script attributes
-    const projectToken = getAttr(currentScript, 'data-token');
-    const autoStart = getAttr(currentScript, 'data-auto-start') === 'true';
-    const flowId = getAttr(currentScript, 'data-flow-id');
-    const envKey = getAttr(currentScript, 'data-env-key');
-    const userId = getAttr(currentScript, 'data-user-id');
-    const userName = getAttr(currentScript, 'data-user-name');
-    const userEmail = getAttr(currentScript, 'data-user-email');
-    const refKey = getAttr(currentScript, 'data-refkey') || getAttr(currentScript, 'data-ref-key');
+    function resolveConfig() {
+        var cfg = {
+            projectToken: getAttr(currentScript, 'data-token'),
+            autoStart: getAttr(currentScript, 'data-auto-start') === 'true',
+            flowId: getAttr(currentScript, 'data-flow-id'),
+            envKey: getAttr(currentScript, 'data-env-key'),
+            userId: getAttr(currentScript, 'data-user-id'),
+            userName: getAttr(currentScript, 'data-user-name'),
+            userEmail: getAttr(currentScript, 'data-user-email'),
+            refKey: getAttr(currentScript, 'data-refkey') || getAttr(currentScript, 'data-ref-key')
+        };
 
-    // Flag to track if initialized via data attributes
+        try {
+            if (window.modalflow && Array.isArray(window.modalflow._q)) {
+                var queue = window.modalflow._q;
+                for (var i = 0; i < queue.length; i++) {
+                    var method = queue[i][0], args = queue[i][1];
+                    if (method === 'init' && args.length > 0) {
+                        cfg.envKey = args[0] || cfg.envKey;
+                        var opts = args[1] || {};
+                        cfg.refKey = opts.licenseKey || opts.refKey || cfg.refKey;
+                        if (opts.flowId) cfg.flowId = opts.flowId;
+                        if (opts.autoStart !== undefined) cfg.autoStart = !!opts.autoStart;
+                    }
+                    if (method === 'identify' && args.length > 0) {
+                        cfg.userId = args[0] || cfg.userId;
+                        var traits = args[1] || {};
+                        if (traits.name) cfg.userName = traits.name;
+                        if (traits.email) cfg.userEmail = traits.email;
+                    }
+                    if (method === 'startFlow' && args.length > 0) {
+                        cfg.flowId = cfg.flowId || args[0];
+                        cfg.autoStart = true;
+                    }
+                }
+            }
+        } catch (e) {}
+
+        return cfg;
+    }
+
+    var _cfg = resolveConfig();
+    const projectToken = _cfg.projectToken;
+    const autoStart = _cfg.autoStart;
+    const flowId = _cfg.flowId;
+    const envKey = _cfg.envKey;
+    const userId = _cfg.userId;
+    const userName = _cfg.userName;
+    const userEmail = _cfg.userEmail;
+    const refKey = _cfg.refKey;
+
     let initializedViaDataAttributes = false;
 
-    // Reference Key Authentication Module
     const RefKeyAuth = {
         validated: false,
         validating: false,
@@ -57,10 +93,8 @@
         },
 
         getRefKey: function () {
-            // First check data-refkey attribute on the script tag
             if (refKey) return refKey;
 
-            // Fallback to #mflows-lockout element - only if DOM is ready
             try {
                 if (!document.body) {
                     return '';
@@ -170,13 +204,10 @@
 
     function addModalStyles() {
         try {
-        if (document.getElementById('modal-flow-styles')) {
-            return;
-        }
-
-        const styleTag = document.createElement('style');
-        styleTag.id = 'modal-flow-styles';
-        styleTag.innerHTML = `
+        // If the shadow root already exists (runtime loaded before us), inject there.
+        // Otherwise fall back to document.head and also queue a re-injection once
+        // the shadow root is available.
+        var styleContent = `
         /* Add your custom modal styles here */
         .light {
             --mf-theme-primary: #0d6efd;
@@ -250,7 +281,38 @@
           .modal-launcher-tooltip-btn-secondary:hover{background:#e5e7eb;}
       `;
 
-        (document.head || document.documentElement).appendChild(styleTag);
+        function injectIntoShadow() {
+            try {
+                var root = window.__mfShadowRoot;
+                if (!root) return false;
+                if (root.getElementById ? root.getElementById('modal-flow-styles') : root.querySelector('#modal-flow-styles')) return true;
+                var st = document.createElement('style');
+                st.id = 'modal-flow-styles';
+                st.innerHTML = styleContent;
+                root.appendChild(st);
+                return true;
+            } catch(e) { return false; }
+        }
+
+        // Try shadow root first (available if runtime already loaded)
+        if (!injectIntoShadow()) {
+            // Shadow root not yet available — also inject into document.head as
+            // a lightweight fallback, then retry into shadow root once available.
+            if (!document.getElementById('modal-flow-styles')) {
+                var styleTag = document.createElement('style');
+                styleTag.id = 'modal-flow-styles';
+                styleTag.innerHTML = styleContent;
+                (document.head || document.documentElement).appendChild(styleTag);
+            }
+            // Poll until shadow root is ready, then migrate the styles
+            var _retries = 0;
+            var _poll = setInterval(function() {
+                _retries++;
+                if (injectIntoShadow() || _retries > 100) {
+                    clearInterval(_poll);
+                }
+            }, 50);
+        }
         } catch (e) {} // silently ignore style injection failures
     }
     function loadModalLoader() {
@@ -292,8 +354,12 @@
                     const s = d.createElement('script');
                     s.id = 'mf-runtime-js';
                     s.async = true;
-                    // s.src = "http://localhost:3000/modal-runtime.js";
-                    s.src = 'https://hlptflowbuilder.s3.us-east-1.amazonaws.com/test/mf-runtime.js';
+                    var cdnBase = (window.modalflow && window.modalflow._cdn) ? window.modalflow._cdn + '/' : '';
+                    if (!cdnBase) {
+                        var scriptSrc = currentScript && currentScript.src;
+                        cdnBase = scriptSrc ? scriptSrc.substring(0, scriptSrc.lastIndexOf('/') + 1) : '/';
+                    }
+                    s.src = cdnBase + 'mf-runtime.js';
                     s.onload = function () {
                         if (typeof w.modal._onReady === 'function') {
                             // w.modal._onReady();
@@ -301,7 +367,7 @@
                         w.modal._sdkReady = true;
                     };
                     s.onerror = function () {
-                        console.error('[ModalFlow] Failed to load runtime from S3');
+                        console.error('[ModalFlow] Failed to load runtime from:', s.src);
                     };
                     (d.head || d.documentElement).appendChild(s);
                 }
@@ -397,11 +463,13 @@
             window.modal.identify(userId, traits);
         }
 
+        if (envKey) {
+            window.__modalFlowEnvKey = envKey;
+        }
+
         if (flowId) {
             waitForSDKReady(() => {
-                if (envKey) {
-                    window.__modalFlowEnvKey = envKey;
-                }
+
                 window.modal.initModalFlow(flowId, refKey, { envKey: envKey });
 
                 if (autoStart) {
@@ -411,6 +479,8 @@
                     }, 1000);
                 }
             });
+        } else if (envKey) {
+            // no flowId, but envKey - do nothing
         }
     }
 
@@ -451,8 +521,28 @@
 
     // Expose helper functions globally
     try {
-    window.ModalFlow = {
-        startFlow: function (flowId, data) {
+    var publicAPI = {
+        init: function () { return publicAPI; },
+
+        identify: function (uid, traits) {
+            try {
+                if (window.modal && window.modal.identify) {
+                    window.modal.identify(uid, traits);
+                }
+            } catch (e) {}
+            return publicAPI;
+        },
+
+        startFlow: function (fId, data) {
+            try {
+                if (window.modal) {
+                    window.modal.initModalFlow(fId, refKey);
+                    waitForSDKReady(function () {
+                        window.modal.start(fId, refKey, data);
+                    });
+                }
+            } catch (e) {}
+            return publicAPI;
         },
 
         endFlow: function () {
@@ -461,10 +551,12 @@
                     window.modal.end();
                 }
             } catch (e) {}
+            return publicAPI;
         },
 
-        identify: function (userId, traits) {
-        },
+        on: function () { return publicAPI; },
+        off: function () { return publicAPI; },
+        reset: function () { return publicAPI; },
 
         validateRefKey: function (callback) {
             try { RefKeyAuth.validate(callback); } catch (e) { try { callback(false); } catch (_) {} }
@@ -478,9 +570,27 @@
             try { return window.__modalFlowRefKey.hasKey; } catch (e) { return false; }
         },
 
-        debug: function () {
-        }
-    };
-    } catch (e) {}
+        isReady: function () {
+            try { return !!(window.modal && window.modal._sdkReady); } catch (e) { return false; }
+        },
 
+        debug: function () {}
+    };
+
+
+
+    // Primary namespace
+    if (window.modalflow) {
+        var preservedCdn = window.modalflow._cdn;
+        Object.keys(publicAPI).forEach(function (k) { window.modalflow[k] = publicAPI[k]; });
+        window.modalflow._loaded = true;
+        window.modalflow._cdn = preservedCdn;
+    } else {
+        window.modalflow = publicAPI;
+        window.modalflow._loaded = true;
+    }
+
+    // Legacy alias
+    window.ModalFlow = publicAPI;
+    } catch (e) {}
 })();
