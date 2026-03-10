@@ -1690,6 +1690,7 @@
   }
   
   function showBeaconOnElement(element, position) {
+    console.log('[Modalflow] Showing beacon on element:', element, 'with position config:', position);
       try {
           if (!element) return;
   
@@ -2372,7 +2373,26 @@
   
   function evaluateElementCondition(trigger) {
       try {
-          const norm = (v) => String(v == null ? "" : v).toLowerCase().replace(/[\s_-]+/g, "");
+        // Normalize strings by removing spaces, underscores, and hyphens without dropping letters.
+        const norm = (v) => String(v == null ? "" : v).toLowerCase().replace(/[ _-]+/g, "");
+
+        // Track page constraints so we only search selectors on matching pages.
+        const normalizeUrlish = (v) => {
+            const base = String(v || "").trim();
+            const withoutQueryHash = base.replace(/[#?].*$/, "");
+            return withoutQueryHash.replace(/\\+$/, "").toLowerCase();
+        };
+        const pageUrls = [];
+        const pageOrigins = [];
+        const pagePaths = [];
+        const collectPageMeta = (meta) => {
+            try {
+                if (!meta || typeof meta !== "object") return;
+                if (meta.pageUrl) pageUrls.push(String(meta.pageUrl));
+                if (meta.pageOrigin) pageOrigins.push(String(meta.pageOrigin));
+                if (meta.pagePath) pagePaths.push(String(meta.pagePath));
+            } catch (_) { }
+        };
 
           // Resolve selector(s) from multiple possible shapes.
           let selectorsToTry = [];
@@ -2383,6 +2403,7 @@
           try {
               if (trigger && trigger.selectedElementValues && trigger.selectedElementValues.element) {
                   const el = trigger.selectedElementValues.element || {};
+                  collectPageMeta(el);
                   if (el.cssSelector) selectorsToTry.unshift(String(el.cssSelector).trim());
                   if (Array.isArray(el.cssSelectors)) selectorsToTry = selectorsToTry.concat(el.cssSelectors.map(s => String(s).trim()).filter(Boolean));
                   if (el.indexMap && typeof el.indexMap === 'object') indexMap = el.indexMap;
@@ -2396,6 +2417,7 @@
               const picker = trigger && (trigger.element_picker_content || trigger.elementPickerContent);
               if (picker && picker.selectedElementValues && picker.selectedElementValues.element) {
                   const el = picker.selectedElementValues.element || {};
+                  collectPageMeta(el);
                   if (el.cssSelector) selectorsToTry.unshift(String(el.cssSelector).trim());
                   if (Array.isArray(el.cssSelectors)) selectorsToTry = selectorsToTry.concat(el.cssSelectors.map(s => String(s).trim()).filter(Boolean));
                   if (el.indexMap && typeof el.indexMap === 'object') indexMap = el.indexMap;
@@ -2410,6 +2432,7 @@
               if (rawMeta) {
                   const meta = (typeof rawMeta === 'string') ? JSON.parse(rawMeta) : rawMeta;
                   if (meta && typeof meta === 'object') {
+                      collectPageMeta(meta);
                       if (meta.cssSelector) selectorsToTry.unshift(String(meta.cssSelector).trim());
                       if (Array.isArray(meta.cssSelectors)) selectorsToTry = selectorsToTry.concat(meta.cssSelectors.map(s => String(s).trim()).filter(Boolean));
                       if (meta.indexMap && typeof meta.indexMap === 'object') indexMap = meta.indexMap;
@@ -2439,14 +2462,40 @@
               const gm = trigger && trigger.goManualValues;
               if (gm) {
                   const css = gm.cssSelector && gm.cssSelector.value;
-                  if (css && String(css).trim()) selectorsToTry.unshift(String(css).trim());
+                  if (css && String(css).trim()) {
+                      // goManual often holds JSON with page metadata; collect it if so.
+                      try {
+                          const parsed = typeof css === 'string' ? JSON.parse(css) : null;
+                          if (parsed && typeof parsed === 'object') collectPageMeta(parsed);
+                      } catch (_) { }
+                      selectorsToTry.unshift(String(css).trim());
+                  }
               }
           } catch (_) { }
 
           selectorsToTry = Array.from(new Set(selectorsToTry.filter(Boolean).map(s => String(s).trim()).filter(Boolean)));
-          if (!selectorsToTry.length) return false;
-
           let el = null;
+
+          // If page constraints exist, ensure current page matches before querying DOM.
+          try {
+              const hasConstraints = pageUrls.length || pageOrigins.length || pagePaths.length;
+              const loc = (typeof window !== "undefined" && window.location) ? window.location : null;
+              if (hasConstraints && loc) {
+                  const href = normalizeUrlish(loc.href);
+                  const origin = normalizeUrlish(loc.origin || "");
+                  const path = normalizeUrlish(loc.pathname || "");
+                  const matchesPage = (
+                      (!pageUrls.length || pageUrls.some(u => normalizeUrlish(u) === href)) &&
+                      (!pageOrigins.length || pageOrigins.some(o => normalizeUrlish(o) === origin)) &&
+                      (!pagePaths.length || pagePaths.some(p => normalizeUrlish(p) === path))
+                  );
+                  if (!matchesPage) {
+                    el = null;
+                    selectorsToTry = []; // Don't try selectors if page constraints don't match
+                  }
+              }
+          } catch (_) { }
+          
           for (const sel of selectorsToTry) {
               try {
                   const idxForSel = (indexMap && Object.prototype.hasOwnProperty.call(indexMap, sel)) ? Number(indexMap[sel]) : index;
